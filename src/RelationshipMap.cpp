@@ -146,8 +146,9 @@ std::vector<RelationshipFamilyInfo> buildRelationshipFamilies(const SaveData& sa
                    "Curio reward item, activation/quantity, state, and companion fields share exact UnitIDs.",
                    {0x076DU, 0x076EU, 0x076FU, 0x0770U});
     addKnownFamily(result, save, "Quick Values", "Confirmed",
-                   "Confirmed global scalar values share the logical UnitID 0.",
-                   {0x0450U, 0x0451U, 0x0452U, 0x0458U});
+                   "Global scalar values share logical UnitID 0; DLC special-currency balances are optional.",
+                   {0x0450U, 0x0451U, 0x0452U, 0x0458U},
+                   {0x0A31U, 0x045CU});
 
     const auto& detected = save.linkedClusters();
     for (std::size_t index = 0U; index < detected.size(); ++index) {

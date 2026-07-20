@@ -8,7 +8,7 @@ set "LOG_FILE=build-windows-x64-warnings-errors.log"
 
 if exist "%LOG_FILE%" del /q "%LOG_FILE%"
 
-echo Configuring GBFR - TOOL v1.00 x64 Release build...
+echo Configuring GBFR - TOOL v1.04 x64 Release build...
 cmake -S . -B "%BUILD_DIR%" -A x64 -DGBFR_TOOL_BUILD_TESTS=ON >>"%LOG_FILE%" 2>&1
 if errorlevel 1 goto :fail
 

@@ -22,6 +22,8 @@
 0x0456	FF56040000	User Counter 1110	User Data	Unknown	USERDATA_1110	Int	NA	NA	Official enum USERDATA_1110; observed to count upward. Counts up ?	Perform one likely counted activity at a time.
 0x0457	FF57040000	User Value 1111	User Data	Unknown	USERDATA_1111	Int	NA	NA	Official enum USERDATA_1111; single Int.	Compare fresh, cleared-story, and postgame saves.
 0x0458	FF58040000	Mastery Points (MSP)	Currencies	Confirmed	USERDATA_MASTERY_POINTS	Int	NA	NA	Official SaveIDType USERDATA_MASTERY_POINTS. Mastery Points (MSP)	NA
+0x0A31	FF310A0000	Conflux Points (CP)	Currencies	Confirmed	NA	UInt	NA	NA	DLC special-currency balance for item hash 68EADAA9 / ITEM_35_2000. The item row identifies the currency; this section stores the spendable amount.	NA
+0x045C	FF5C040000	Resonance Points (RP)	Currencies	Confirmed	NA	Int	NA	NA	DLC special-currency balance for item hash 2657283E / ITEM_35_3000. The item row identifies the currency; this section stores the spendable amount.	NA
 0x1A91	FF911A0000	Unknown Global Flag 6801	Global State	Unknown	UNK_6801	UInt	NA	NA	Official enum UNK_6801; single UInt currently 1.	Compare brand-new and progressed saves.
 0x0A94	FF940A0000	Gem/Sigil Global Field 2708	Sigils	Unknown	GEMDATA_2708	UInt	NA	NA	Official enum GEMDATA_2708; single UInt currently 7.	Modify sigil inventory/equipment and compare.
 0x04B1	FFB1040000	Current Location Stage ID	Location	Confirmed	CURRENT_LOCATION_STAGE_ID	Int	NA	NA	Official SaveIDType CURRENT_LOCATION_STAGE_ID.	NA

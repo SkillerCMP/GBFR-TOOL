@@ -5,9 +5,8 @@
     width="220"
   >
 </p>
-
 <h1 align="center">Granblue Fantasy: Relink - Save Tool</h1>
-<h3 align="center">GBFR - TOOL v1.00</h3>
+<h3 align="center">GBFR - TOOL v1.04</h3>
 
 <p align="center">
   <a href="https://github.com/SkillerCMP/GBFR-TOOL/releases">

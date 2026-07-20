@@ -192,18 +192,68 @@ int main() {
            "acquired sigils family definition");
 
     const auto& curios = curiosFamily();
-    expect(curios.anchorKey == 0x076DU && curios.fieldCount == 3U,
+    expect(curios.anchorKey == 0x076DU && curios.fieldCount == 4U,
            "curios family definition");
     expect(curios.grouping == LogicalGroupingKind::CurioSlotEntries,
            "curios grouped as five entries per slot");
-    expect(curios.fields[1].key == 0x076EU && curios.fields[1].kind == LogicalValueKind::Signed,
+    expect(curios.fields[0].key == 0x07D2U &&
+           curios.fields[0].unitScope == LogicalFieldUnitScope::CurioSlot,
+           "curio slot-level type field");
+    expect(curios.fields[1].key == 0x076DU &&
+           curios.fields[1].kind == LogicalValueKind::Hash,
+           "curio reward item field");
+    expect(curios.fields[2].key == 0x076EU && curios.fields[2].kind == LogicalValueKind::Signed,
            "curio activation quantity field");
+    expect(logicalFieldRecordUnitId(curios.fields[0], 2101U) == 21U,
+           "curio slot field maps reward UnitID to slot UnitID");
+    expect(logicalFieldRecordUnitId(curios.fields[1], 2101U) == 2101U,
+           "curio reward field keeps reward UnitID");
 
     const auto& quickValues = quickValuesFamily();
-    expect(quickValues.anchorKey == 0x0450U && quickValues.fieldCount == 4U,
+    expect(quickValues.anchorKey == 0x0450U && quickValues.fieldCount == 6U,
            "quick values family definition");
     expect(quickValues.fields[3].key == 0x0458U,
            "quick values mastery points field");
+    expect(quickValues.fields[4].key == 0x0A31U &&
+           quickValues.fields[4].kind == LogicalValueKind::Unsigned &&
+           quickValues.fields[4].optional,
+           "quick values optional Conflux Points field");
+    expect(quickValues.fields[5].key == 0x045CU &&
+           quickValues.fields[5].kind == LogicalValueKind::Signed &&
+           quickValues.fields[5].optional,
+           "quick values optional Resonance Points field");
+
+    const auto* confluxCurrency = specialCurrencyForItemHash(0x68EADAA9U);
+    expect(confluxCurrency && confluxCurrency->balanceKey == 0x0A31U &&
+           confluxCurrency->abbreviation == "CP",
+           "Conflux Point item redirects to CP balance");
+    const auto* resonanceCurrency = specialCurrencyForItemHash(0x2657283EU);
+    expect(resonanceCurrency && resonanceCurrency->balanceKey == 0x045CU &&
+           resonanceCurrency->abbreviation == "RP",
+           "Resonance Point item redirects to RP balance");
+    expect(specialCurrencyForItemHash(0x12345678U) == nullptr,
+           "ordinary item is not a redirected special currency");
+
+    expect(curioTierNumberForHash(0xF42D8C01U) == 1U,
+           "Curio T1 hash mapping");
+    expect(curioTierNumberForHash(0x6198F427U) == 2U,
+           "Curio T2 hash mapping");
+    expect(curioTierNumberForHash(0x4AC30D94U) == 3U,
+           "Curio T3 hash mapping");
+    expect(curioTierNumberForHash(0x76079579U) == 4U,
+           "Curio T4 hash mapping");
+    expect(curioTierNumberForHash(0x12345678U) == 0U,
+           "unknown Curio tier hash mapping");
+    const auto& curioChoices = curioHashChoices();
+    expect(curioChoices.size() == 5U, "Curio picker has exactly five choices");
+    expect(curioChoices[0].hash == kGlobalEmptySlotHash &&
+           curioChoices[0].label == "Global Empty Slot",
+           "Curio picker global empty choice");
+    expect(curioChoices[1].hash == 0xF42D8C01U && curioChoices[1].label == "T1" &&
+           curioChoices[2].hash == 0x6198F427U && curioChoices[2].label == "T2" &&
+           curioChoices[3].hash == 0x4AC30D94U && curioChoices[3].label == "T3" &&
+           curioChoices[4].hash == 0x76079579U && curioChoices[4].label == "T4",
+           "Curio picker tier choices and order");
 
     const auto masteryShared = decodeLogicalUnitId(masteryFamily, 199U);
     expect(masteryShared.valid && masteryShared.shared && masteryShared.slot == 199U,

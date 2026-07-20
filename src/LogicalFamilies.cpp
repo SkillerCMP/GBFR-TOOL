@@ -9,6 +9,22 @@
 namespace gdtv {
 namespace {
 
+constexpr SpecialCurrencyDefinition kConfluxPointsCurrency{
+    0x68EADAA9U, 0x0A31U, "Conflux Points", "CP"
+};
+constexpr SpecialCurrencyDefinition kResonancePointsCurrency{
+    0x2657283EU, 0x045CU, "Resonance Points", "RP"
+};
+
+constexpr std::uint32_t kCurioTierKey = 0x07D2U;
+constexpr std::array<CurioHashChoice, 5> kCurioHashChoices{{
+    {kGlobalEmptySlotHash, "Global Empty Slot"},
+    {0xF42D8C01U, "T1"},
+    {0x6198F427U, "T2"},
+    {0x4AC30D94U, "T3"},
+    {0x76079579U, "T4"},
+}};
+
 constexpr std::array<LogicalFieldDefinition, 7> kSummonFields{{
     {0x05B0U, 0U, "FFB005", "Unique instance number", "Likely", LogicalValueKind::Unsigned, false},
     {0x05B1U, 0U, "FFB105", "Summon ID", "Confirmed", LogicalValueKind::Hash, false},
@@ -129,9 +145,14 @@ constexpr LogicalFamilyDefinition kAcquiredSigilsFamily{
     LogicalGroupingKind::Flat
 };
 
-// Curio reward records share 4,995 exact UnitIDs. The fourth 0x0770 field is
-// intentionally omitted because its meaning is not yet known.
-constexpr std::array<LogicalFieldDefinition, 3> kCurioFields{{
+// Curio reward records share 4,995 exact UnitIDs. FFD2070000 is a
+// slot-level companion: UnitID N identifies the T1-T4 Curio type for reward
+// entries N*100 through N*100+4. The fourth 0x0770 reward-entry field remains
+// omitted because its meaning is not yet known.
+constexpr std::array<LogicalFieldDefinition, 4> kCurioFields{{
+    {0x07D2U, 0U, "FFD207", "Curio Type / Tier (T1-T4)", "Confirmed",
+     LogicalValueKind::Hash, false, "Treasure", false,
+     LogicalFieldUnitScope::CurioSlot},
     {0x076DU, 0U, "FF6D07", "Curio Reward Item ID", "Confirmed", LogicalValueKind::Hash, false},
     {0x076EU, 0U, "FF6E07", "Activation / Quantity", "Strong", LogicalValueKind::Signed, false},
     {0x076FU, 0U, "FF6F07", "State / Flags", "Tentative", LogicalValueKind::Bitfield, false},
@@ -143,11 +164,13 @@ constexpr LogicalFamilyDefinition kCuriosFamily{
 };
 
 // Confirmed scalar values can be edited together as a single global record.
-constexpr std::array<LogicalFieldDefinition, 4> kQuickValueFields{{
+constexpr std::array<LogicalFieldDefinition, 6> kQuickValueFields{{
     {0x0450U, 0U, "FF5004", "Rupies", "Confirmed", LogicalValueKind::Signed, false},
     {0x0451U, 0U, "FF5104", "Transmarvel Currency / Count", "Strong", LogicalValueKind::Signed, false},
     {0x0452U, 0U, "FF5204", "Commendations", "Confirmed", LogicalValueKind::Signed, false},
     {0x0458U, 0U, "FF5804", "Mastery Points (MSP)", "Confirmed", LogicalValueKind::Signed, false},
+    {0x0A31U, 0U, "FF310A", "Conflux Points (CP)", "Confirmed", LogicalValueKind::Unsigned, true},
+    {0x045CU, 0U, "FF5C04", "Resonance Points (RP)", "Confirmed", LogicalValueKind::Signed, true},
 }};
 
 constexpr LogicalFamilyDefinition kQuickValuesFamily{
@@ -179,6 +202,65 @@ const LogicalFamilyDefinition& currentSigilsFamily() noexcept { return kCurrentS
 const LogicalFamilyDefinition& acquiredSigilsFamily() noexcept { return kAcquiredSigilsFamily; }
 const LogicalFamilyDefinition& curiosFamily() noexcept { return kCuriosFamily; }
 const LogicalFamilyDefinition& quickValuesFamily() noexcept { return kQuickValuesFamily; }
+
+const SpecialCurrencyDefinition* specialCurrencyForItemHash(
+    std::uint32_t itemHash) noexcept {
+    if (itemHash == kConfluxPointsCurrency.itemHash) return &kConfluxPointsCurrency;
+    if (itemHash == kResonancePointsCurrency.itemHash) return &kResonancePointsCurrency;
+    return nullptr;
+}
+
+const SpecialCurrencyDefinition* specialCurrencyForItemEntry(
+    const SaveData& save, std::uint32_t unitId) noexcept {
+    const auto* record = save.findRecord(0x0709U, unitId);
+    if (!record || record->elementCount == 0U) return nullptr;
+    try {
+        return specialCurrencyForItemHash(static_cast<std::uint32_t>(
+            save.elementBits(0x0709U, unitId, 0U)));
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+const std::array<CurioHashChoice, 5>& curioHashChoices() noexcept {
+    return kCurioHashChoices;
+}
+
+std::uint32_t curioTierNumberForHash(std::uint32_t curioHash) noexcept {
+    for (std::size_t index = 1U; index < kCurioHashChoices.size(); ++index) {
+        if (kCurioHashChoices[index].hash == curioHash) {
+            return static_cast<std::uint32_t>(index);
+        }
+    }
+    return 0U;
+}
+
+std::uint32_t curioSlotTierNumber(const SaveData& save,
+                                  std::uint32_t slotIndex) noexcept {
+    const auto* record = save.findRecord(kCurioTierKey, slotIndex);
+    if (!record || record->elementCount == 0U) return 0U;
+    try {
+        const auto curioHash = static_cast<std::uint32_t>(
+            save.elementBits(kCurioTierKey, slotIndex, 0U));
+        return curioTierNumberForHash(curioHash);
+    } catch (...) {
+        return 0U;
+    }
+}
+
+bool curioRewardEntryFilled(const SaveData& save,
+                            std::uint32_t rewardUnitId) noexcept {
+    const auto* record = save.findRecord(kCuriosFamily.anchorKey, rewardUnitId);
+    if (!record || record->elementCount == 0U) return false;
+    try {
+        const auto rewardHash = static_cast<std::uint32_t>(
+            save.elementBits(kCuriosFamily.anchorKey, rewardUnitId, 0U));
+        return rewardHash != 0U && rewardHash != 0xFFFFFFFFU &&
+               !isGlobalEmptySlotHash(rewardHash);
+    } catch (...) {
+        return false;
+    }
+}
 
 const std::array<const LogicalFamilyDefinition*, 9>& sharedLogicalFamilies() noexcept {
     return kSharedLogicalFamilies;
@@ -258,10 +340,19 @@ LogicalUnitAddress decodeLogicalUnitId(const LogicalFamilyDefinition& family,
     return result;
 }
 
+std::uint32_t logicalFieldRecordUnitId(const LogicalFieldDefinition& field,
+                                       std::uint32_t logicalUnitId) noexcept {
+    if (field.unitScope == LogicalFieldUnitScope::CurioSlot) {
+        return logicalUnitId / 100U;
+    }
+    return logicalUnitId;
+}
+
 bool logicalFieldAvailable(const SaveData& save,
                            const LogicalFieldDefinition& field,
                            std::uint32_t unitId) noexcept {
-    const auto* record = save.findRecord(field.key, unitId);
+    const auto recordUnitId = logicalFieldRecordUnitId(field, unitId);
+    const auto* record = save.findRecord(field.key, recordUnitId);
     return record && field.elementIndex < record->elementCount;
 }
 
@@ -283,8 +374,9 @@ std::string logicalHashFieldDisplayName(const SaveData& save,
         !logicalFieldAvailable(save, field, unitId)) {
         return {};
     }
+    const auto recordUnitId = logicalFieldRecordUnitId(field, unitId);
     const auto hash = static_cast<std::uint32_t>(
-        save.elementBits(field.key, unitId, field.elementIndex));
+        save.elementBits(field.key, recordUnitId, field.elementIndex));
     return logicalHashDisplayName(hashDatabase, hash);
 }
 
@@ -295,7 +387,7 @@ std::vector<std::string> curioSlotRewardDisplayNames(const SaveData& save,
     const auto* anchor = save.findGroup(family.anchorKey);
     if (!anchor || family.fieldCount == 0U) return {};
 
-    const auto& rewardField = family.fields[0];
+    const auto& rewardField = family.fields[1];
     std::vector<std::pair<std::uint32_t, std::uint32_t>> entries;
     for (const auto& record : anchor->records) {
         const auto address = decodeLogicalUnitId(family, record.index);

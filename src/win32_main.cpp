@@ -809,10 +809,29 @@ LRESULT CALLBACK hashListDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
-std::optional<std::uint32_t> showHashListDialog(HWND owner, const gdtv::HashDatabase& database,
-                                                    std::string_view categoryFilter = {},
-                                                    const wchar_t* title = L"Hash List",
-                                                    bool categoryPrefix = false) {
+const std::vector<gdtv::HashEntry>& curioHashPickerEntries() {
+    static const auto entries = [] {
+        std::vector<gdtv::HashEntry> result;
+        result.reserve(gdtv::curioHashChoices().size());
+        for (const auto& choice : gdtv::curioHashChoices()) {
+            gdtv::HashEntry entry;
+            entry.hash = choice.hash;
+            entry.displayName = std::string(choice.label);
+            entry.category = "Curio Type";
+            entry.builtInFriendly = true;
+            result.push_back(std::move(entry));
+        }
+        return result;
+    }();
+    return entries;
+}
+
+std::optional<std::uint32_t> showHashListDialog(
+    HWND owner, const gdtv::HashDatabase& database,
+    std::string_view categoryFilter = {},
+    const wchar_t* title = L"Hash List",
+    bool categoryPrefix = false,
+    const std::vector<gdtv::HashEntry>* fixedEntries = nullptr) {
     constexpr wchar_t className[] = L"GBFRToolHashListDialog";
     static bool registered = false;
     if (!registered) {
@@ -829,20 +848,22 @@ std::optional<std::uint32_t> showHashListDialog(HWND owner, const gdtv::HashData
 
     HashListDialogContext context;
     context.owner = owner;
-    context.entries = database.allEntries();
+    context.entries = fixedEntries ? *fixedEntries : database.allEntries();
 
-    // Present one canonical Global Empty Slot row even when the external
-    // database still contains an older removed-slot label for the same hash.
-    const auto* globalEmpty = database.preferred(gdtv::kGlobalEmptySlotHash);
-    context.entries.erase(
-        std::remove_if(context.entries.begin(), context.entries.end(),
-                       [](const gdtv::HashEntry& entry) {
-                           return gdtv::isGlobalEmptySlotHash(entry.hash);
-                       }),
-        context.entries.end());
-    if (globalEmpty) context.entries.push_back(*globalEmpty);
+    if (!fixedEntries) {
+        // Present one canonical Global Empty Slot row even when the external
+        // database still contains an older removed-slot label for the same hash.
+        const auto* globalEmpty = database.preferred(gdtv::kGlobalEmptySlotHash);
+        context.entries.erase(
+            std::remove_if(context.entries.begin(), context.entries.end(),
+                           [](const gdtv::HashEntry& entry) {
+                               return gdtv::isGlobalEmptySlotHash(entry.hash);
+                           }),
+            context.entries.end());
+        if (globalEmpty) context.entries.push_back(*globalEmpty);
+    }
 
-    if (!categoryFilter.empty()) {
+    if (!fixedEntries && !categoryFilter.empty()) {
         const std::string category(categoryFilter);
         context.entries.erase(
             std::remove_if(context.entries.begin(), context.entries.end(),
@@ -1498,8 +1519,58 @@ constexpr UINT ID_LOGICAL_EDIT_BASE = 4000;
 constexpr UINT ID_LOGICAL_MOD_BASE = 4100;
 constexpr UINT ID_LOGICAL_HASH_BASE = 4200;
 
+std::wstring specialCurrencyNameW(const gdtv::SpecialCurrencyDefinition& currency) {
+    auto result = utf8ToWide(std::string(currency.name));
+    if (!currency.abbreviation.empty()) {
+        result += L" (" + utf8ToWide(std::string(currency.abbreviation)) + L")";
+    }
+    return result;
+}
+
+const gdtv::SpecialCurrencyDefinition* redirectedItemCurrency(
+    const LogicalFamilyModDialogContext& context, std::size_t fieldIndex) {
+    if (!context.family || !context.save || fieldIndex >= context.family->fieldCount ||
+        context.family->anchorKey != gdtv::itemsFamily().anchorKey) {
+        return nullptr;
+    }
+    const auto& field = context.family->fields[fieldIndex];
+    if (field.key != 0x070AU) return nullptr;
+    return gdtv::specialCurrencyForItemEntry(*context.save, context.unitId);
+}
+
+std::wstring specialCurrencyRedirectSummary(
+    const LogicalFamilyModDialogContext& context,
+    const gdtv::SpecialCurrencyDefinition& currency) {
+    auto result = L"See Quick Values - " + specialCurrencyNameW(currency);
+    if (!context.save) return result + L".";
+    const auto* record = context.save->findRecord(currency.balanceKey, 0U);
+    if (!record || record->elementCount == 0U) {
+        return result + L" section is not present in this save.";
+    }
+    try {
+        const auto bits = static_cast<std::uint32_t>(
+            context.save->elementBits(currency.balanceKey, 0U, 0U));
+        if (currency.balanceKey == 0x045CU) {
+            result += L" balance: " +
+                std::to_wstring(bitCopy<std::int32_t>(bits));
+        } else {
+            result += L" balance: " + std::to_wstring(bits);
+        }
+    } catch (...) {
+        result += L" balance is unavailable";
+    }
+    return result + L".";
+}
+
 std::wstring logicalFamilyWindowTitle(const LogicalFamilyModDialogContext& context) {
     if (!context.family) return L"Logical Record MOD";
+    if (context.family->grouping == gdtv::LogicalGroupingKind::CurioSlotEntries) {
+        const auto address = gdtv::decodeLogicalUnitId(*context.family, context.unitId);
+        if (address.valid) {
+            return L"Curios - Slot " + numberW(address.slot + 1U) + L" / Reward Entry " +
+                   numberW(address.position) + L"  -  MOD";
+        }
+    }
     return utf8ToWide(std::string(context.family->name)) + L" - " +
            logicalUnitSummaryW(*context.family, context.unitId) + L"  -  MOD";
 }
@@ -1508,8 +1579,10 @@ std::wstring logicalFamilyEditSeed(const LogicalFamilyModDialogContext& context,
                                    std::size_t fieldIndex) {
     if (!context.family || fieldIndex >= context.family->fieldCount) return {};
     const auto& field = context.family->fields[fieldIndex];
+    if (redirectedItemCurrency(context, fieldIndex)) return L"See Quick Values";
     if (!gdtv::logicalFieldAvailable(*context.save, field, context.unitId)) return L"<not present>";
-    const auto bits = context.save->elementBits(field.key, context.unitId, field.elementIndex);
+    const auto recordUnitId = gdtv::logicalFieldRecordUnitId(field, context.unitId);
+    const auto bits = context.save->elementBits(field.key, recordUnitId, field.elementIndex);
     if (field.kind == gdtv::LogicalValueKind::Hash) return hexW(bits, 8);
     if (field.kind == gdtv::LogicalValueKind::Signed ||
         field.kind == gdtv::LogicalValueKind::Bitfield) {
@@ -1522,11 +1595,15 @@ std::wstring logicalFamilyValueSummary(const LogicalFamilyModDialogContext& cont
                                        std::size_t fieldIndex) {
     if (!context.family || fieldIndex >= context.family->fieldCount) return {};
     const auto& field = context.family->fields[fieldIndex];
+    if (const auto* currency = redirectedItemCurrency(context, fieldIndex)) {
+        return specialCurrencyRedirectSummary(context, *currency);
+    }
     if (!gdtv::logicalFieldAvailable(*context.save, field, context.unitId)) {
         return field.optional ? L"Optional section is not present in this save." : L"Required field is missing.";
     }
+    const auto recordUnitId = gdtv::logicalFieldRecordUnitId(field, context.unitId);
     const auto value = static_cast<std::uint32_t>(
-        context.save->elementBits(field.key, context.unitId, field.elementIndex));
+        context.save->elementBits(field.key, recordUnitId, field.elementIndex));
     if (field.kind == gdtv::LogicalValueKind::Hash) {
         if (!context.hashDatabase) return {};
         const auto category = !field.hashCategoryFilter.empty()
@@ -1539,6 +1616,10 @@ std::wstring logicalFamilyValueSummary(const LogicalFamilyModDialogContext& cont
         (void)prefix;
         if (!entry) return category.empty() ? L"Unknown hash" : L"Unknown or unexpected hash";
         std::wstring result;
+        if (field.key == 0x07D2U) {
+            const auto tier = gdtv::curioTierNumberForHash(value);
+            if (tier != 0U) result = L"T" + numberW(tier) + L" | ";
+        }
         if (!entry->displayName.empty()) result += utf8ToWide(entry->displayName);
         if (!entry->id.empty()) {
             if (!result.empty()) result += L" | ";
@@ -1564,14 +1645,16 @@ void refreshLogicalFamilyRow(LogicalFamilyModDialogContext& context,
                              std::size_t fieldIndex) {
     if (!context.family || fieldIndex >= context.family->fieldCount) return;
     const auto& field = context.family->fields[fieldIndex];
+    const bool redirected = redirectedItemCurrency(context, fieldIndex) != nullptr;
     const bool available = gdtv::logicalFieldAvailable(*context.save, field, context.unitId);
     SetWindowTextW(context.edits[fieldIndex], logicalFamilyEditSeed(context, fieldIndex).c_str());
     SetWindowTextW(context.resolvedLabels[fieldIndex],
                    logicalFamilyValueSummary(context, fieldIndex).c_str());
-    EnableWindow(context.edits[fieldIndex], available ? TRUE : FALSE);
-    EnableWindow(context.modButtons[fieldIndex], available ? TRUE : FALSE);
+    const bool editable = available && !redirected;
+    EnableWindow(context.edits[fieldIndex], editable ? TRUE : FALSE);
+    EnableWindow(context.modButtons[fieldIndex], editable ? TRUE : FALSE);
     if (context.hashButtons[fieldIndex]) {
-        EnableWindow(context.hashButtons[fieldIndex], available ? TRUE : FALSE);
+        EnableWindow(context.hashButtons[fieldIndex], editable ? TRUE : FALSE);
     }
 }
 
@@ -1600,6 +1683,7 @@ bool applyLogicalFamilyField(LogicalFamilyModDialogContext& context,
                              std::size_t fieldIndex) {
     if (!context.family || fieldIndex >= context.family->fieldCount) return false;
     const auto& field = context.family->fields[fieldIndex];
+    if (redirectedItemCurrency(context, fieldIndex)) return false;
     if (!gdtv::logicalFieldAvailable(*context.save, field, context.unitId)) return false;
     std::wstring error;
     const auto value = parseSummonModValue(getWindowTextString(context.edits[fieldIndex]),
@@ -1626,9 +1710,16 @@ bool applyLogicalFamilyField(LogicalFamilyModDialogContext& context,
         }
     }
     try {
-        context.save->setElementBits(field.key, context.unitId, field.elementIndex, *value);
+        const auto recordUnitId = gdtv::logicalFieldRecordUnitId(field, context.unitId);
+        context.save->setElementBits(field.key, recordUnitId, field.elementIndex, *value);
         context.changed = true;
-        refreshLogicalFamilyRow(context, fieldIndex);
+        if (context.family->anchorKey == gdtv::itemsFamily().anchorKey && field.key == 0x0709U) {
+            for (std::size_t index = 0U; index < context.family->fieldCount; ++index) {
+                refreshLogicalFamilyRow(context, index);
+            }
+        } else {
+            refreshLogicalFamilyRow(context, fieldIndex);
+        }
         const auto message = legacyLocatorW(field.key) +
             L" modified in memory. Use File > Save Edited ... As.";
         SetWindowTextW(context.statusLabel, message.c_str());
@@ -1714,9 +1805,11 @@ LRESULT CALLBACK logicalFamilyModDialogProc(HWND hwnd, UINT message, WPARAM wPar
             const auto categoryPrefix = !field.hashCategoryFilter.empty()
                 ? field.hashCategoryPrefix : context->family->hashCategoryPrefix;
             EnableWindow(context->owner, FALSE);
+            const auto* fixedEntries = field.key == 0x07D2U
+                ? &curioHashPickerEntries() : nullptr;
             const auto selected = showHashListDialog(
                 hwnd, *context->hashDatabase, category,
-                title.c_str(), categoryPrefix);
+                title.c_str(), categoryPrefix, fixedEntries);
             EnableWindow(context->owner, TRUE);
             SetForegroundWindow(hwnd);
             if (selected) {
@@ -3170,10 +3263,14 @@ private:
     std::wstring logicalFieldLabel(const gdtv::SaveData& save,
                                    const gdtv::LogicalFieldDefinition& field,
                                    std::uint32_t unitId) const {
-        (void)save;
-        (void)unitId;
-        return utf8ToWide(std::string(field.locator)) + L" - " +
-               utf8ToWide(std::string(field.label));
+        auto label = utf8ToWide(std::string(field.locator)) + L" - " +
+                     utf8ToWide(std::string(field.label));
+        if (field.key == 0x070AU) {
+            if (const auto* currency = gdtv::specialCurrencyForItemEntry(save, unitId)) {
+                label += L" - See Quick Values section: " + specialCurrencyNameW(*currency);
+            }
+        }
+        return label;
     }
 
     std::wstring logicalHashName(const gdtv::SaveData& save,
@@ -3187,8 +3284,9 @@ private:
                                   const gdtv::LogicalFieldDefinition& field,
                                   std::uint32_t unitId) const {
         if (!gdtv::logicalFieldAvailable(save, field, unitId)) return {};
+        const auto recordUnitId = gdtv::logicalFieldRecordUnitId(field, unitId);
         const auto bits = static_cast<std::uint32_t>(
-            save.elementBits(field.key, unitId, field.elementIndex));
+            save.elementBits(field.key, recordUnitId, field.elementIndex));
         return std::to_wstring(bitCopy<std::int32_t>(bits));
     }
 
@@ -3462,9 +3560,13 @@ private:
             auto label = L"Slot " + numberW(slotIndex + 1U);
             const auto rewardNames =
                 gdtv::curioSlotRewardDisplayNames(*data.save, hashDatabase_, slotIndex);
-            for (std::size_t index = 0U; index < rewardNames.size(); ++index) {
-                label += index == 0U ? L" - " : L" / ";
-                label += utf8ToWide(rewardNames[index]);
+            if (!rewardNames.empty()) {
+                const auto tierNumber = gdtv::curioSlotTierNumber(*data.save, slotIndex);
+                if (tierNumber != 0U) label += L" - T" + numberW(tierNumber);
+                for (std::size_t index = 0U; index < rewardNames.size(); ++index) {
+                    label += index == 0U ? L" - " : L" / ";
+                    label += utf8ToWide(rewardNames[index]);
+                }
             }
             const auto slot = addItem(item, label, slotData, !entries.empty());
             if (!entries.empty()) addDummy(slot);
@@ -3477,6 +3579,31 @@ private:
         if (!family || family->grouping != gdtv::LogicalGroupingKind::CurioSlotEntries) return;
         const auto* anchor = data.save->findGroup(family->anchorKey);
         if (!anchor) return;
+
+        // FFD2070000 is one record per logical Curio slot, not one record per
+        // reward entry. Show it once at the slot level while also exposing it
+        // in the reward-entry MOD window through the CurioSlot field scope.
+        for (std::size_t fieldIndex = 0U; fieldIndex < family->fieldCount; ++fieldIndex) {
+            const auto& field = family->fields[fieldIndex];
+            if (field.unitScope != gdtv::LogicalFieldUnitScope::CurioSlot) continue;
+            std::size_t ordinal = 0U;
+            const auto* record = data.save->findRecord(field.key, data.logicalNamespace, &ordinal);
+            if (!record || field.elementIndex >= record->elementCount) continue;
+            const auto* group = data.save->findGroup(field.key);
+            if (!group) continue;
+            NodeData fieldData{NodeKind::LogicalField, data.role, data.save};
+            fieldData.vectorNumber = group->vectorNumber;
+            fieldData.key = field.key;
+            fieldData.start = field.elementIndex;
+            fieldData.recordOrdinal = ordinal;
+            fieldData.unitId = data.logicalNamespace;
+            fieldData.logicalFieldIndex = static_cast<std::uint32_t>(fieldIndex);
+            fieldData.logicalFamilyAnchor = family->anchorKey;
+            auto fieldLabel = logicalFieldLabel(*data.save, field, data.logicalNamespace);
+            const auto tier = gdtv::curioSlotTierNumber(*data.save, data.logicalNamespace);
+            if (tier != 0U) fieldLabel += L" - T" + numberW(tier);
+            addItem(item, fieldLabel, fieldData);
+        }
 
         std::vector<std::pair<std::uint32_t, std::size_t>> entries;
         for (std::size_t ordinal = 0U; ordinal < anchor->records.size(); ++ordinal) {
@@ -3494,10 +3621,11 @@ private:
             entryData.recordOrdinal = ordinal;
             entryData.unitId = unitId;
             entryData.logicalNamespace = data.logicalNamespace;
-            const auto entry = addItem(item,
+            auto entryLabel =
                 L"Curio Reward Entry " + numberW(entryIndex) + L" - " +
-                    curioEntryTypeLabel(entryIndex),
-                entryData, true);
+                curioEntryTypeLabel(entryIndex);
+            if (gdtv::curioRewardEntryFilled(*data.save, unitId)) entryLabel += L"**";
+            const auto entry = addItem(item, entryLabel, entryData, true);
             addDummy(entry);
         }
     }
@@ -3509,8 +3637,10 @@ private:
         if (!family) return;
         for (std::size_t fieldIndex = 0; fieldIndex < family->fieldCount; ++fieldIndex) {
             const auto& field = family->fields[fieldIndex];
+            if (field.unitScope == gdtv::LogicalFieldUnitScope::CurioSlot) continue;
+            const auto recordUnitId = gdtv::logicalFieldRecordUnitId(field, data.unitId);
             std::size_t ordinal = 0;
-            const auto* record = data.save->findRecord(field.key, data.unitId, &ordinal);
+            const auto* record = data.save->findRecord(field.key, recordUnitId, &ordinal);
             if (!record || field.elementIndex >= record->elementCount) {
                 if (!field.optional) {
                     addItem(item,
@@ -3527,7 +3657,7 @@ private:
             fieldData.key = field.key;
             fieldData.start = field.elementIndex;
             fieldData.recordOrdinal = ordinal;
-            fieldData.unitId = data.unitId;
+            fieldData.unitId = recordUnitId;
             fieldData.logicalFieldIndex = static_cast<std::uint32_t>(fieldIndex);
             fieldData.logicalFamilyAnchor = family->anchorKey;
             addItem(item, logicalFieldLabel(*data.save, field, data.unitId), fieldData);
@@ -4313,6 +4443,18 @@ private:
 
     void editSelectedValue() {
         if (const auto* data = nodeData(TreeView_GetSelection(tree_)); data) {
+            if (data->kind == NodeKind::LogicalField && data->save &&
+                data->logicalFamilyAnchor == gdtv::itemsFamily().anchorKey &&
+                data->key == 0x070AU) {
+                if (const auto* currency =
+                        gdtv::specialCurrencyForItemEntry(*data->save, data->unitId)) {
+                    const auto message = specialCurrencyNameW(*currency) +
+                        L" uses a dedicated balance section. Edit it under Quick Values instead.";
+                    MessageBoxW(hwnd_, message.c_str(), L"See Quick Values",
+                                MB_OK | MB_ICONINFORMATION);
+                    return;
+                }
+            }
             if (data->kind == NodeKind::LogicalSlot) {
                 openLogicalSlotModWindow(*data);
                 return;
@@ -4998,6 +5140,13 @@ private:
                         << L"Current Value: "
                         << formatElementValue(*data->save, field.key, data->unitId,
                                               field.elementIndex, field.kind) << L"\r\n";
+                    if (field.key == 0x070AU) {
+                        if (const auto* currency =
+                                gdtv::specialCurrencyForItemEntry(*data->save, data->unitId)) {
+                            out << L"Editing: See Quick Values section - "
+                                << specialCurrencyNameW(*currency) << L".\r\n";
+                        }
+                    }
                     if (showDetailedLogicalInfo_) {
                         std::wostringstream detailed;
                         showRecordDetails(*data, detailed, hex, values);

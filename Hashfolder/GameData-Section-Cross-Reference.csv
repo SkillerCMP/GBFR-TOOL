@@ -184,3 +184,5 @@ Source Row,Locator Search,Key,Key Hex,Stable Locator,Locator Rule,Mapping Confid
 183,FF3D0A0000,2621,0x0A3D,V10:0x0A3D,Leading byte + 4-byte little-endian key,Confirmed,,64,64,,,DLC exact,0x38,,,,10,0-63,9,DLC-only key,,29
 184,FFE8250000,9704,0x25E8,V2:0x25E8,Leading byte + 4-byte little-endian key,Confirmed,,"1,000",1000,,,DLC exact,0x40,,,,2,0-999,41,DLC-only key,,93
 185,FF0F070000,1807,0x070F,V6:0x070F,Leading byte + 4-byte little-endian key,Confirmed,Unknown Item Field,,,,,SaveFiletest exact: 500 records / UnitIDs 0-499,0x18,,,,,,,,,
+186,FF310A0000,2609,0x0A31,V7:0x0A31,Leading byte + 4-byte little-endian key,Confirmed,Conflux Points (CP),1,1,,,DLC exact; one UnitID 0 UInt balance value,0x18,,,,7,0,1,DLC-only key,,
+187,FF5C040000,1116,0x045C,V6:0x045C,Leading byte + 4-byte little-endian key,Confirmed,Resonance Points (RP),1,1,,,DLC exact; one UnitID 0 Int balance value,0x18,,,,6,0,1,DLC-only key,,

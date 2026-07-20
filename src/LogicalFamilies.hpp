@@ -29,6 +29,11 @@ enum class LogicalGroupingKind {
     CurioSlotEntries
 };
 
+enum class LogicalFieldUnitScope {
+    Entry,
+    CurioSlot
+};
+
 struct LogicalUnitAddress {
     bool valid{};
     bool shared{};
@@ -51,6 +56,7 @@ struct LogicalFieldDefinition {
     // category filter remains the fallback.
     std::string_view hashCategoryFilter;
     bool hashCategoryPrefix{};
+    LogicalFieldUnitScope unitScope{LogicalFieldUnitScope::Entry};
 
     constexpr LogicalFieldDefinition(std::uint32_t fieldKey,
                                      std::uint32_t fieldElementIndex,
@@ -60,7 +66,9 @@ struct LogicalFieldDefinition {
                                      LogicalValueKind fieldKind,
                                      bool fieldOptional,
                                      std::string_view fieldHashCategoryFilter = {},
-                                     bool fieldHashCategoryPrefix = false) noexcept
+                                     bool fieldHashCategoryPrefix = false,
+                                     LogicalFieldUnitScope fieldUnitScope =
+                                         LogicalFieldUnitScope::Entry) noexcept
         : key(fieldKey),
           elementIndex(fieldElementIndex),
           locator(fieldLocator),
@@ -69,7 +77,8 @@ struct LogicalFieldDefinition {
           kind(fieldKind),
           optional(fieldOptional),
           hashCategoryFilter(fieldHashCategoryFilter),
-          hashCategoryPrefix(fieldHashCategoryPrefix) {}
+          hashCategoryPrefix(fieldHashCategoryPrefix),
+          unitScope(fieldUnitScope) {}
 };
 
 struct LogicalFamilyDefinition {
@@ -83,6 +92,18 @@ struct LogicalFamilyDefinition {
     LogicalGroupingKind grouping{LogicalGroupingKind::Flat};
 };
 
+struct SpecialCurrencyDefinition {
+    std::uint32_t itemHash{};
+    std::uint32_t balanceKey{};
+    std::string_view name;
+    std::string_view abbreviation;
+};
+
+struct CurioHashChoice {
+    std::uint32_t hash{};
+    std::string_view label;
+};
+
 [[nodiscard]] const LogicalFamilyDefinition& summonInventoryFamily() noexcept;
 [[nodiscard]] const LogicalFamilyDefinition& masteryTreeFamily() noexcept;
 [[nodiscard]] const LogicalFamilyDefinition& currentTraitsFamily() noexcept;
@@ -93,6 +114,18 @@ struct LogicalFamilyDefinition {
 [[nodiscard]] const LogicalFamilyDefinition& acquiredSigilsFamily() noexcept;
 [[nodiscard]] const LogicalFamilyDefinition& curiosFamily() noexcept;
 [[nodiscard]] const LogicalFamilyDefinition& quickValuesFamily() noexcept;
+[[nodiscard]] const SpecialCurrencyDefinition* specialCurrencyForItemHash(
+    std::uint32_t itemHash) noexcept;
+[[nodiscard]] const SpecialCurrencyDefinition* specialCurrencyForItemEntry(
+    const SaveData& save, std::uint32_t unitId) noexcept;
+[[nodiscard]] const std::array<CurioHashChoice, 5>&
+curioHashChoices() noexcept;
+[[nodiscard]] std::uint32_t curioTierNumberForHash(
+    std::uint32_t curioHash) noexcept;
+[[nodiscard]] std::uint32_t curioSlotTierNumber(
+    const SaveData& save, std::uint32_t slotIndex) noexcept;
+[[nodiscard]] bool curioRewardEntryFilled(
+    const SaveData& save, std::uint32_t rewardUnitId) noexcept;
 
 // Families presented through the shared Logical Save Records tree/editor path.
 // Mastery Tree keeps its established dedicated editor and is therefore not in
@@ -105,6 +138,9 @@ sharedLogicalFamilies() noexcept;
                                    const LogicalFamilyDefinition& family) noexcept;
 [[nodiscard]] LogicalUnitAddress decodeLogicalUnitId(const LogicalFamilyDefinition& family,
                                                        std::uint32_t unitId) noexcept;
+[[nodiscard]] std::uint32_t logicalFieldRecordUnitId(
+    const LogicalFieldDefinition& field,
+    std::uint32_t logicalUnitId) noexcept;
 [[nodiscard]] bool logicalFieldAvailable(const SaveData& save,
                                          const LogicalFieldDefinition& field,
                                          std::uint32_t unitId) noexcept;
