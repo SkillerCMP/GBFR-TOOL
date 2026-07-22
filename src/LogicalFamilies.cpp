@@ -9,6 +9,12 @@
 namespace gdtv {
 namespace {
 
+constexpr SpecialCurrencyDefinition kRupiesCurrency{
+    0x8E5A0C09U, 0x0450U, "Rupies", ""
+};
+constexpr SpecialCurrencyDefinition kMasteryPointsCurrency{
+    0x0657F403U, 0x0458U, "Mastery Points", "MSP"
+};
 constexpr SpecialCurrencyDefinition kConfluxPointsCurrency{
     0x68EADAA9U, 0x0A31U, "Conflux Points", "CP"
 };
@@ -17,6 +23,8 @@ constexpr SpecialCurrencyDefinition kResonancePointsCurrency{
 };
 
 constexpr std::uint32_t kCurioTierKey = 0x07D2U;
+constexpr std::uint32_t kCurioCounterKey = 0x07D3U;
+constexpr std::uint32_t kCurioRewardEntriesPerSlot = 5U;
 constexpr std::array<CurioHashChoice, 5> kCurioHashChoices{{
     {kGlobalEmptySlotHash, "Global Empty Slot"},
     {0xF42D8C01U, "T1"},
@@ -145,13 +153,17 @@ constexpr LogicalFamilyDefinition kAcquiredSigilsFamily{
     LogicalGroupingKind::Flat
 };
 
-// Curio reward records share 4,995 exact UnitIDs. FFD2070000 is a
-// slot-level companion: UnitID N identifies the T1-T4 Curio type for reward
-// entries N*100 through N*100+4. The fourth 0x0770 reward-entry field remains
-// omitted because its meaning is not yet known.
-constexpr std::array<LogicalFieldDefinition, 4> kCurioFields{{
+// Curio reward records share 4,995 exact UnitIDs. FFD2070000 and
+// FFD3070000 are slot-level companions: UnitID N identifies the T1-T4 Curio
+// type and its slot counter for reward entries N*100 through N*100+4. The
+// fourth 0x0770 reward-entry field remains omitted because its meaning is not
+// yet known.
+constexpr std::array<LogicalFieldDefinition, 5> kCurioFields{{
     {0x07D2U, 0U, "FFD207", "Curio Type / Tier (T1-T4)", "Confirmed",
      LogicalValueKind::Hash, false, "Treasure", false,
+     LogicalFieldUnitScope::CurioSlot},
+    {0x07D3U, 0U, "FFD307", "Curio Slot Counter", "Confirmed",
+     LogicalValueKind::Unsigned, false, {}, false,
      LogicalFieldUnitScope::CurioSlot},
     {0x076DU, 0U, "FF6D07", "Curio Reward Item ID", "Confirmed", LogicalValueKind::Hash, false},
     {0x076EU, 0U, "FF6E07", "Activation / Quantity", "Strong", LogicalValueKind::Signed, false},
@@ -205,9 +217,23 @@ const LogicalFamilyDefinition& quickValuesFamily() noexcept { return kQuickValue
 
 const SpecialCurrencyDefinition* specialCurrencyForItemHash(
     std::uint32_t itemHash) noexcept {
+    if (itemHash == kRupiesCurrency.itemHash) return &kRupiesCurrency;
+    if (itemHash == kMasteryPointsCurrency.itemHash) return &kMasteryPointsCurrency;
     if (itemHash == kConfluxPointsCurrency.itemHash) return &kConfluxPointsCurrency;
     if (itemHash == kResonancePointsCurrency.itemHash) return &kResonancePointsCurrency;
     return nullptr;
+}
+
+bool isCurioItemHash(std::uint32_t itemHash) noexcept {
+    for (std::size_t index = 1U; index < kCurioHashChoices.size(); ++index) {
+        if (itemHash == kCurioHashChoices[index].hash) return true;
+    }
+    return false;
+}
+
+bool isProtectedBulkItemHash(std::uint32_t itemHash) noexcept {
+    if (specialCurrencyForItemHash(itemHash)) return true;
+    return isCurioItemHash(itemHash);
 }
 
 const SpecialCurrencyDefinition* specialCurrencyForItemEntry(
@@ -260,6 +286,74 @@ bool curioRewardEntryFilled(const SaveData& save,
     } catch (...) {
         return false;
     }
+}
+
+bool curioSlotHasRewards(const SaveData& save,
+                         std::uint32_t slotIndex) noexcept {
+    const auto rewardBase = slotIndex * 100U;
+    for (std::uint32_t position = 0U; position < kCurioRewardEntriesPerSlot; ++position) {
+        if (curioRewardEntryFilled(save, rewardBase + position)) return true;
+    }
+    return false;
+}
+
+std::uint32_t suggestedCurioSlotCounter(const SaveData& save,
+                                        std::uint32_t slotIndex) noexcept {
+    for (auto prior = slotIndex; prior > 0U; --prior) {
+        const auto priorSlot = prior - 1U;
+        if (!curioSlotHasRewards(save, priorSlot)) continue;
+        const auto* counterRecord = save.findRecord(kCurioCounterKey, priorSlot);
+        if (!counterRecord || counterRecord->elementCount == 0U) continue;
+        try {
+            const auto previousCounter = static_cast<std::uint32_t>(
+                save.elementBits(kCurioCounterKey, priorSlot, 0U));
+            if (previousCounter == 0U) continue;
+            if (previousCounter == 0xFFFFFFFFU) return previousCounter;
+            return previousCounter + 1U;
+        } catch (...) {
+            // Keep scanning older occupied slots when a malformed record is encountered.
+        }
+    }
+    return 1U;
+}
+
+CurioSlotNormalizationResult normalizeCurioSlotAfterRewardEdit(
+    SaveData& save, std::uint32_t slotIndex, std::uint32_t rewardUnitId,
+    bool slotWasEmpty) {
+    CurioSlotNormalizationResult result{};
+    result.empty = !curioSlotHasRewards(save, slotIndex);
+    if (result.empty) {
+        save.setElementBits(kCurioCounterKey, slotIndex, 0U, 0U);
+        return result;
+    }
+
+    result.counter = static_cast<std::uint32_t>(
+        save.elementBits(kCurioCounterKey, slotIndex, 0U));
+    result.tier = curioSlotTierNumber(save, slotIndex);
+    if (!slotWasEmpty) return result;
+
+    result.newlyActivated = true;
+    result.counter = suggestedCurioSlotCounter(save, slotIndex);
+    save.setElementBits(kCurioCounterKey, slotIndex, 0U, result.counter);
+
+    if (result.tier == 0U) {
+        result.tier = 1U;
+        save.setElementBits(kCurioTierKey, slotIndex, 0U,
+                            kCurioHashChoices[1U].hash);
+    }
+
+    const auto rewardHash = static_cast<std::uint32_t>(
+        save.elementBits(kCuriosFamily.anchorKey, rewardUnitId, 0U));
+    if (rewardHash != 0U && rewardHash != 0xFFFFFFFFU &&
+        !isGlobalEmptySlotHash(rewardHash)) {
+        const auto activation = static_cast<std::uint32_t>(
+            save.elementBits(0x076EU, rewardUnitId, 0U));
+        if (activation == 0U) {
+            save.setElementBits(0x076EU, rewardUnitId, 0U, 1U);
+            result.rewardActivated = true;
+        }
+    }
+    return result;
 }
 
 const std::array<const LogicalFamilyDefinition*, 9>& sharedLogicalFamilies() noexcept {
@@ -387,7 +481,7 @@ std::vector<std::string> curioSlotRewardDisplayNames(const SaveData& save,
     const auto* anchor = save.findGroup(family.anchorKey);
     if (!anchor || family.fieldCount == 0U) return {};
 
-    const auto& rewardField = family.fields[1];
+    const auto& rewardField = family.fields[2];
     std::vector<std::pair<std::uint32_t, std::uint32_t>> entries;
     for (const auto& record : anchor->records) {
         const auto address = decodeLogicalUnitId(family, record.index);

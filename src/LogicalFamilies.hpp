@@ -104,6 +104,14 @@ struct CurioHashChoice {
     std::string_view label;
 };
 
+struct CurioSlotNormalizationResult {
+    bool empty{};
+    bool newlyActivated{};
+    bool rewardActivated{};
+    std::uint32_t counter{};
+    std::uint32_t tier{};
+};
+
 [[nodiscard]] const LogicalFamilyDefinition& summonInventoryFamily() noexcept;
 [[nodiscard]] const LogicalFamilyDefinition& masteryTreeFamily() noexcept;
 [[nodiscard]] const LogicalFamilyDefinition& currentTraitsFamily() noexcept;
@@ -118,6 +126,9 @@ struct CurioHashChoice {
     std::uint32_t itemHash) noexcept;
 [[nodiscard]] const SpecialCurrencyDefinition* specialCurrencyForItemEntry(
     const SaveData& save, std::uint32_t unitId) noexcept;
+[[nodiscard]] bool isCurioItemHash(std::uint32_t itemHash) noexcept;
+[[nodiscard]] bool isProtectedBulkItemHash(
+    std::uint32_t itemHash) noexcept;
 [[nodiscard]] const std::array<CurioHashChoice, 5>&
 curioHashChoices() noexcept;
 [[nodiscard]] std::uint32_t curioTierNumberForHash(
@@ -126,6 +137,19 @@ curioHashChoices() noexcept;
     const SaveData& save, std::uint32_t slotIndex) noexcept;
 [[nodiscard]] bool curioRewardEntryFilled(
     const SaveData& save, std::uint32_t rewardUnitId) noexcept;
+[[nodiscard]] bool curioSlotHasRewards(
+    const SaveData& save, std::uint32_t slotIndex) noexcept;
+// Returns one more than the nearest earlier occupied Curio slot counter.
+// If no earlier occupied slot has a usable counter, the sequence starts at 1.
+[[nodiscard]] std::uint32_t suggestedCurioSlotCounter(
+    const SaveData& save, std::uint32_t slotIndex) noexcept;
+// Applies the Curio slot consistency rules after one reward entry is edited.
+// Empty slots use counter 0. A newly populated slot continues the nearest
+// earlier active counter, defaults an invalid/empty tier to T1, and activates
+// the inserted reward entry when its activation value is still zero.
+[[nodiscard]] CurioSlotNormalizationResult normalizeCurioSlotAfterRewardEdit(
+    SaveData& save, std::uint32_t slotIndex, std::uint32_t rewardUnitId,
+    bool slotWasEmpty);
 
 // Families presented through the shared Logical Save Records tree/editor path.
 // Mastery Tree keeps its established dedicated editor and is therefore not in

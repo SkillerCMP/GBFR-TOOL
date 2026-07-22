@@ -192,21 +192,27 @@ int main() {
            "acquired sigils family definition");
 
     const auto& curios = curiosFamily();
-    expect(curios.anchorKey == 0x076DU && curios.fieldCount == 4U,
+    expect(curios.anchorKey == 0x076DU && curios.fieldCount == 5U,
            "curios family definition");
     expect(curios.grouping == LogicalGroupingKind::CurioSlotEntries,
            "curios grouped as five entries per slot");
     expect(curios.fields[0].key == 0x07D2U &&
            curios.fields[0].unitScope == LogicalFieldUnitScope::CurioSlot,
            "curio slot-level type field");
-    expect(curios.fields[1].key == 0x076DU &&
-           curios.fields[1].kind == LogicalValueKind::Hash,
+    expect(curios.fields[1].key == 0x07D3U &&
+           curios.fields[1].kind == LogicalValueKind::Unsigned &&
+           curios.fields[1].unitScope == LogicalFieldUnitScope::CurioSlot,
+           "curio slot counter field");
+    expect(curios.fields[2].key == 0x076DU &&
+           curios.fields[2].kind == LogicalValueKind::Hash,
            "curio reward item field");
-    expect(curios.fields[2].key == 0x076EU && curios.fields[2].kind == LogicalValueKind::Signed,
+    expect(curios.fields[3].key == 0x076EU && curios.fields[3].kind == LogicalValueKind::Signed,
            "curio activation quantity field");
     expect(logicalFieldRecordUnitId(curios.fields[0], 2101U) == 21U,
-           "curio slot field maps reward UnitID to slot UnitID");
-    expect(logicalFieldRecordUnitId(curios.fields[1], 2101U) == 2101U,
+           "curio tier field maps reward UnitID to slot UnitID");
+    expect(logicalFieldRecordUnitId(curios.fields[1], 2101U) == 21U,
+           "curio counter field maps reward UnitID to slot UnitID");
+    expect(logicalFieldRecordUnitId(curios.fields[2], 2101U) == 2101U,
            "curio reward field keeps reward UnitID");
 
     const auto& quickValues = quickValuesFamily();
@@ -227,12 +233,44 @@ int main() {
     expect(confluxCurrency && confluxCurrency->balanceKey == 0x0A31U &&
            confluxCurrency->abbreviation == "CP",
            "Conflux Point item redirects to CP balance");
+    const auto* rupiesCurrency = specialCurrencyForItemHash(0x8E5A0C09U);
+    expect(rupiesCurrency && rupiesCurrency->balanceKey == 0x0450U &&
+           rupiesCurrency->name == "Rupies",
+           "Rupie item redirects to Global Values Rupies balance");
+    const auto* masteryCurrency = specialCurrencyForItemHash(0x0657F403U);
+    expect(masteryCurrency && masteryCurrency->balanceKey == 0x0458U &&
+           masteryCurrency->abbreviation == "MSP" &&
+           masteryCurrency->name == "Mastery Points",
+           "Mastery Point item redirects to Global Values Mastery Points balance");
+
     const auto* resonanceCurrency = specialCurrencyForItemHash(0x2657283EU);
     expect(resonanceCurrency && resonanceCurrency->balanceKey == 0x045CU &&
            resonanceCurrency->abbreviation == "RP",
            "Resonance Point item redirects to RP balance");
     expect(specialCurrencyForItemHash(0x12345678U) == nullptr,
            "ordinary item is not a redirected special currency");
+
+    expect(isProtectedBulkItemHash(0x8E5A0C09U),
+           "Rupie item is protected from bulk Item editing");
+    expect(isProtectedBulkItemHash(0x0657F403U),
+           "Mastery Point item is protected from bulk Item editing");
+    expect(isProtectedBulkItemHash(0x68EADAA9U) &&
+           isProtectedBulkItemHash(0x2657283EU),
+           "CP and RP items are protected from bulk Item editing");
+    expect(isCurioItemHash(0xF42D8C01U) &&
+           isCurioItemHash(0x6198F427U) &&
+           isCurioItemHash(0x4AC30D94U) &&
+           isCurioItemHash(0x76079579U) &&
+           !isCurioItemHash(0x12345678U),
+           "Curio T1-T4 item redirect classification");
+
+    expect(isProtectedBulkItemHash(0xF42D8C01U) &&
+           isProtectedBulkItemHash(0x6198F427U) &&
+           isProtectedBulkItemHash(0x4AC30D94U) &&
+           isProtectedBulkItemHash(0x76079579U),
+           "all Curio tier items are protected from bulk Item editing");
+    expect(!isProtectedBulkItemHash(0x12345678U),
+           "ordinary item remains eligible for bulk Item editing");
 
     expect(curioTierNumberForHash(0xF42D8C01U) == 1U,
            "Curio T1 hash mapping");

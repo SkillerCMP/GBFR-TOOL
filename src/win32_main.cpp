@@ -28,6 +28,7 @@
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iterator>
 #include <limits>
@@ -95,6 +96,9 @@ constexpr UINT ID_BTN_LOAD_MAP = 2003;
 constexpr UINT ID_EDIT_SEARCH = 2004;
 constexpr UINT ID_BTN_SEARCH = 2005;
 constexpr UINT ID_BTN_CLEAR_SEARCH = 2006;
+constexpr UINT ID_BTN_SEARCH_PREVIOUS = 2011;
+constexpr UINT ID_BTN_SEARCH_NEXT = 2012;
+constexpr UINT ID_SEARCH_POSITION = 2013;
 constexpr UINT ID_BTN_COPY_LOCATOR = 2007;
 constexpr UINT ID_BTN_EXPORT = 2008;
 constexpr UINT ID_BTN_ADD_HASH = 2009;
@@ -108,6 +112,8 @@ constexpr UINT ID_VALUES = 2106;
 constexpr UINT WM_APP_SUMMON_MOD_CLOSED = WM_APP + 1U;
 constexpr UINT WM_APP_MASTERY_MOD_CLOSED = WM_APP + 2U;
 constexpr UINT WM_APP_LOGICAL_MOD_CLOSED = WM_APP + 3U;
+constexpr UINT WM_APP_BULK_MOD_CLOSED = WM_APP + 4U;
+constexpr UINT WM_APP_FOCUS_LOGICAL_FAMILY = WM_APP + 5U;
 
 HMENU controlId(UINT id) noexcept {
     return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id));
@@ -175,6 +181,9 @@ std::wstring logicalUnitSummaryW(const gdtv::LogicalFamilyDefinition& family,
                numberW(address.slot);
     case gdtv::LogicalGroupingKind::Flat:
         return utf8ToWide(std::string(family.slotLabel)) + L" " + numberW(address.slot);
+    case gdtv::LogicalGroupingKind::CurioSlotEntries:
+        return L"Slot " + numberW(address.slot + 1U) + L" / Reward Entry " +
+               numberW(address.position);
     }
     return utf8ToWide(std::string(family.slotLabel)) + L" " + numberW(unitId);
 }
@@ -944,7 +953,7 @@ struct SummonSlotModDialogContext {
 };
 
 constexpr UINT ID_SUMMON_EDIT_BASE = 3400;
-constexpr UINT ID_SUMMON_MOD_BASE = 3500;
+constexpr UINT ID_SUMMON_APPLY = 3500;
 constexpr UINT ID_SUMMON_HASH_BASE = 3600;
 
 std::wstring summonEditSeed(const SummonSlotModDialogContext& context, std::size_t fieldIndex) {
@@ -1066,21 +1075,36 @@ std::optional<std::uint64_t> parseSummonModValue(const std::wstring& inputText,
     }
 }
 
-bool applySummonSlotField(SummonSlotModDialogContext& context, std::size_t fieldIndex) {
-    const auto& field = gdtv::summonInventoryFamily().fields[fieldIndex];
-    std::wstring error;
-    const auto value = parseSummonModValue(getWindowTextString(context.edits[fieldIndex]),
-                                           field, *context.hashDatabase, error);
-    if (!value) {
-        MessageBoxW(context.window, error.c_str(), L"Summon Slot MOD", MB_OK | MB_ICONERROR);
-        return false;
+bool applySummonSlotAll(SummonSlotModDialogContext& context) {
+    const auto& family = gdtv::summonInventoryFamily();
+    std::array<std::uint64_t, 7> values{};
+    for (std::size_t fieldIndex = 0; fieldIndex < family.fieldCount; ++fieldIndex) {
+        std::wstring error;
+        const auto value = parseSummonModValue(getWindowTextString(context.edits[fieldIndex]),
+                                               family.fields[fieldIndex],
+                                               *context.hashDatabase, error);
+        if (!value) {
+            const auto message = utf8ToWide(std::string(family.fields[fieldIndex].label)) +
+                L": " + error;
+            MessageBoxW(context.window, message.c_str(), L"Summon Slot MOD",
+                        MB_OK | MB_ICONERROR);
+            return false;
+        }
+        values[fieldIndex] = *value;
     }
+
     try {
-        context.save->setElementBits(field.key, context.unitId, field.elementIndex, *value);
+        for (std::size_t fieldIndex = 0; fieldIndex < family.fieldCount; ++fieldIndex) {
+            const auto& field = family.fields[fieldIndex];
+            context.save->setElementBits(field.key, context.unitId,
+                                         field.elementIndex, values[fieldIndex]);
+        }
         context.changed = true;
-        refreshSummonSlotRow(context, fieldIndex);
-        const auto message = utf8ToWide(std::string(field.locator)) + L" modified in memory. Use File > Save Edited ... As.";
-        SetWindowTextW(context.statusLabel, message.c_str());
+        for (std::size_t fieldIndex = 0; fieldIndex < family.fieldCount; ++fieldIndex) {
+            refreshSummonSlotRow(context, fieldIndex);
+        }
+        SetWindowTextW(context.statusLabel,
+                       L"All Summon slot values were modified in memory. Use File > Save Edited ... As.");
         return true;
     } catch (const std::exception& exception) {
         MessageBoxW(context.window, utf8ToWide(exception.what()).c_str(), L"Summon Slot MOD",
@@ -1119,14 +1143,11 @@ LRESULT CALLBACK summonSlotModDialogProc(HWND hwnd, UINT message, WPARAM wParam,
                              18, y, 276, 24, 0, context->font);
             context->edits[index] = addDialogControl(
                 hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL,
-                300, y - 3, 178, 28, ID_SUMMON_EDIT_BASE + static_cast<UINT>(index),
+                300, y - 3, 232, 28, ID_SUMMON_EDIT_BASE + static_cast<UINT>(index),
                 context->font, WS_EX_CLIENTEDGE);
-            addDialogControl(hwnd, L"BUTTON", L"MOD", WS_TABSTOP | BS_PUSHBUTTON,
-                             488, y - 3, 68, 28,
-                             ID_SUMMON_MOD_BASE + static_cast<UINT>(index), context->font);
             if (field.kind == gdtv::LogicalValueKind::Hash) {
                 addDialogControl(hwnd, L"BUTTON", L"Hash List", WS_TABSTOP | BS_PUSHBUTTON,
-                                 566, y - 3, 96, 28,
+                                 542, y - 3, 120, 28,
                                  ID_SUMMON_HASH_BASE + static_cast<UINT>(index), context->font);
             }
             context->resolvedLabels[index] = addDialogControl(
@@ -1136,16 +1157,18 @@ LRESULT CALLBACK summonSlotModDialogProc(HWND hwnd, UINT message, WPARAM wParam,
         }
 
         context->statusLabel = addDialogControl(
-            hwnd, L"STATIC", L"Values are edited in memory until Save Edited ... As is used.",
-            SS_LEFT, 18, 506, 520, 38, 0, context->font);
-        addDialogControl(hwnd, L"BUTTON", L"Close", WS_TABSTOP | BS_DEFPUSHBUTTON,
+            hwnd, L"STATIC", L"Press MOD to write every value shown above to memory.",
+            SS_LEFT, 18, 506, 438, 38, 0, context->font);
+        addDialogControl(hwnd, L"BUTTON", L"MOD", WS_TABSTOP | BS_DEFPUSHBUTTON,
+                         466, 512, 88, 30, ID_SUMMON_APPLY, context->font);
+        addDialogControl(hwnd, L"BUTTON", L"Close", WS_TABSTOP | BS_PUSHBUTTON,
                          574, 512, 88, 30, IDCANCEL, context->font);
         return 0;
     }
     case WM_COMMAND: {
         const auto id = LOWORD(wParam);
-        if (id >= ID_SUMMON_MOD_BASE && id < ID_SUMMON_MOD_BASE + 7U) {
-            applySummonSlotField(*context, id - ID_SUMMON_MOD_BASE);
+        if (id == ID_SUMMON_APPLY) {
+            applySummonSlotAll(*context);
             return 0;
         }
         if (id >= ID_SUMMON_HASH_BASE && id < ID_SUMMON_HASH_BASE + 7U) {
@@ -1250,7 +1273,7 @@ struct MasteryTreeModDialogContext {
 };
 
 constexpr UINT ID_MASTERY_EDIT_BASE = 3700;
-constexpr UINT ID_MASTERY_MOD_BASE = 3800;
+constexpr UINT ID_MASTERY_APPLY = 3800;
 constexpr UINT ID_MASTERY_HASH_BASE = 3900;
 
 std::wstring masteryEditSeed(const MasteryTreeModDialogContext& context, std::size_t fieldIndex) {
@@ -1310,7 +1333,6 @@ void refreshMasteryTreeRow(MasteryTreeModDialogContext& context, std::size_t fie
     if (!available && field.optional) resolved = L"Optional legacy section is not present in this save.";
     SetWindowTextW(context.resolvedLabels[fieldIndex], resolved.c_str());
     EnableWindow(context.edits[fieldIndex], available ? TRUE : FALSE);
-    EnableWindow(context.modButtons[fieldIndex], available ? TRUE : FALSE);
     if (context.hashButtons[fieldIndex]) EnableWindow(context.hashButtons[fieldIndex], available ? TRUE : FALSE);
 }
 
@@ -1333,23 +1355,37 @@ void selectMasteryTreeEntryInModWindow(MasteryTreeModDialogContext& context,
     SetForegroundWindow(context.window);
 }
 
-bool applyMasteryTreeField(MasteryTreeModDialogContext& context, std::size_t fieldIndex) {
-    const auto& field = gdtv::masteryTreeFamily().fields[fieldIndex];
-    if (!gdtv::logicalFieldAvailable(*context.save, field, context.unitId)) return false;
-    std::wstring error;
-    const auto value = parseSummonModValue(getWindowTextString(context.edits[fieldIndex]),
-                                           field, *context.hashDatabase, error);
-    if (!value) {
-        MessageBoxW(context.window, error.c_str(), L"Mastery Tree MOD", MB_OK | MB_ICONERROR);
-        return false;
+bool applyMasteryTreeAll(MasteryTreeModDialogContext& context) {
+    const auto& family = gdtv::masteryTreeFamily();
+    std::array<std::optional<std::uint64_t>, 3> values{};
+    for (std::size_t fieldIndex = 0; fieldIndex < family.fieldCount; ++fieldIndex) {
+        const auto& field = family.fields[fieldIndex];
+        if (!gdtv::logicalFieldAvailable(*context.save, field, context.unitId)) continue;
+        std::wstring error;
+        const auto value = parseSummonModValue(getWindowTextString(context.edits[fieldIndex]),
+                                               field, *context.hashDatabase, error);
+        if (!value) {
+            const auto message = utf8ToWide(std::string(field.label)) + L": " + error;
+            MessageBoxW(context.window, message.c_str(), L"Mastery Tree MOD",
+                        MB_OK | MB_ICONERROR);
+            return false;
+        }
+        values[fieldIndex] = *value;
     }
+
     try {
-        context.save->setElementBits(field.key, context.unitId, field.elementIndex, *value);
+        for (std::size_t fieldIndex = 0; fieldIndex < family.fieldCount; ++fieldIndex) {
+            if (!values[fieldIndex]) continue;
+            const auto& field = family.fields[fieldIndex];
+            context.save->setElementBits(field.key, context.unitId,
+                                         field.elementIndex, *values[fieldIndex]);
+        }
         context.changed = true;
-        refreshMasteryTreeRow(context, fieldIndex);
-        const auto message = legacyLocatorW(field.key) +
-            L" modified in memory. Use File > Save Edited ... As.";
-        SetWindowTextW(context.statusLabel, message.c_str());
+        for (std::size_t fieldIndex = 0; fieldIndex < family.fieldCount; ++fieldIndex) {
+            refreshMasteryTreeRow(context, fieldIndex);
+        }
+        SetWindowTextW(context.statusLabel,
+                       L"All available Mastery Tree values were modified in memory. Use File > Save Edited ... As.");
         return true;
     } catch (const std::exception& exception) {
         MessageBoxW(context.window, utf8ToWide(exception.what()).c_str(), L"Mastery Tree MOD",
@@ -1388,16 +1424,12 @@ LRESULT CALLBACK masteryTreeModDialogProc(HWND hwnd, UINT message, WPARAM wParam
                              18, y, 326, 24, 0, context->font);
             context->edits[index] = addDialogControl(
                 hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL,
-                348, y - 3, 168, 28, ID_MASTERY_EDIT_BASE + static_cast<UINT>(index),
+                348, y - 3, 222, 28, ID_MASTERY_EDIT_BASE + static_cast<UINT>(index),
                 context->font, WS_EX_CLIENTEDGE);
-            context->modButtons[index] = addDialogControl(
-                hwnd, L"BUTTON", L"MOD", WS_TABSTOP | BS_PUSHBUTTON,
-                526, y - 3, 68, 28,
-                ID_MASTERY_MOD_BASE + static_cast<UINT>(index), context->font);
             if (field.kind == gdtv::LogicalValueKind::Hash) {
                 context->hashButtons[index] = addDialogControl(
                     hwnd, L"BUTTON", L"Hash List", WS_TABSTOP | BS_PUSHBUTTON,
-                    604, y - 3, 96, 28,
+                    580, y - 3, 120, 28,
                     ID_MASTERY_HASH_BASE + static_cast<UINT>(index), context->font);
             }
             context->resolvedLabels[index] = addDialogControl(
@@ -1407,16 +1439,18 @@ LRESULT CALLBACK masteryTreeModDialogProc(HWND hwnd, UINT message, WPARAM wParam
         }
 
         context->statusLabel = addDialogControl(
-            hwnd, L"STATIC", L"Values are edited in memory until Save Edited ... As is used.",
-            SS_LEFT, 18, 282, 520, 38, 0, context->font);
-        addDialogControl(hwnd, L"BUTTON", L"Close", WS_TABSTOP | BS_DEFPUSHBUTTON,
+            hwnd, L"STATIC", L"Press MOD to write every available value shown above to memory.",
+            SS_LEFT, 18, 282, 450, 38, 0, context->font);
+        addDialogControl(hwnd, L"BUTTON", L"MOD", WS_TABSTOP | BS_DEFPUSHBUTTON,
+                         502, 288, 88, 30, ID_MASTERY_APPLY, context->font);
+        addDialogControl(hwnd, L"BUTTON", L"Close", WS_TABSTOP | BS_PUSHBUTTON,
                          612, 288, 88, 30, IDCANCEL, context->font);
         return 0;
     }
     case WM_COMMAND: {
         const auto id = LOWORD(wParam);
-        if (id >= ID_MASTERY_MOD_BASE && id < ID_MASTERY_MOD_BASE + 3U) {
-            applyMasteryTreeField(*context, id - ID_MASTERY_MOD_BASE);
+        if (id == ID_MASTERY_APPLY) {
+            applyMasteryTreeAll(*context);
             return 0;
         }
         if (id >= ID_MASTERY_HASH_BASE && id < ID_MASTERY_HASH_BASE + 3U) {
@@ -1512,12 +1546,14 @@ struct LogicalFamilyModDialogContext {
     std::array<HWND, kMaxSharedLogicalFields> edits{};
     std::array<HWND, kMaxSharedLogicalFields> modButtons{};
     std::array<HWND, kMaxSharedLogicalFields> hashButtons{};
+    std::array<HWND, kMaxSharedLogicalFields> redirectButtons{};
     std::array<HWND, kMaxSharedLogicalFields> resolvedLabels{};
 };
 
 constexpr UINT ID_LOGICAL_EDIT_BASE = 4000;
-constexpr UINT ID_LOGICAL_MOD_BASE = 4100;
+constexpr UINT ID_LOGICAL_APPLY = 4100;
 constexpr UINT ID_LOGICAL_HASH_BASE = 4200;
+constexpr UINT ID_LOGICAL_REDIRECT_BASE = 4700;
 
 std::wstring specialCurrencyNameW(const gdtv::SpecialCurrencyDefinition& currency) {
     auto result = utf8ToWide(std::string(currency.name));
@@ -1527,21 +1563,44 @@ std::wstring specialCurrencyNameW(const gdtv::SpecialCurrencyDefinition& currenc
     return result;
 }
 
-const gdtv::SpecialCurrencyDefinition* redirectedItemCurrency(
-    const LogicalFamilyModDialogContext& context, std::size_t fieldIndex) {
+enum class ItemEntryRedirectTarget { None, QuickValues, Curios };
+
+struct ItemEntryRedirect {
+    ItemEntryRedirectTarget target{ItemEntryRedirectTarget::None};
+    const gdtv::SpecialCurrencyDefinition* currency{};
+    std::uint32_t itemHash{};
+    std::uint32_t familyAnchor{};
+};
+
+ItemEntryRedirect redirectedItemEntry(const LogicalFamilyModDialogContext& context,
+                                      std::size_t fieldIndex) {
     if (!context.family || !context.save || fieldIndex >= context.family->fieldCount ||
-        context.family->anchorKey != gdtv::itemsFamily().anchorKey) {
-        return nullptr;
+        context.family->anchorKey != gdtv::itemsFamily().anchorKey || fieldIndex == 0U) {
+        return {};
     }
-    const auto& field = context.family->fields[fieldIndex];
-    if (field.key != 0x070AU) return nullptr;
-    return gdtv::specialCurrencyForItemEntry(*context.save, context.unitId);
+    const auto itemHash = static_cast<std::uint32_t>(
+        context.save->elementBits(gdtv::itemsFamily().anchorKey, context.unitId, 0U));
+    if (const auto* currency = gdtv::specialCurrencyForItemHash(itemHash)) {
+        return {ItemEntryRedirectTarget::QuickValues, currency, itemHash,
+                gdtv::quickValuesFamily().anchorKey};
+    }
+    if (gdtv::isCurioItemHash(itemHash)) {
+        return {ItemEntryRedirectTarget::Curios, nullptr, itemHash,
+                gdtv::curiosFamily().anchorKey};
+    }
+    return {};
+}
+
+std::wstring itemRedirectButtonText(const ItemEntryRedirect& redirect) {
+    if (redirect.target == ItemEntryRedirectTarget::QuickValues) return L"Go to Global Values";
+    if (redirect.target == ItemEntryRedirectTarget::Curios) return L"Go to Curios";
+    return {};
 }
 
 std::wstring specialCurrencyRedirectSummary(
     const LogicalFamilyModDialogContext& context,
     const gdtv::SpecialCurrencyDefinition& currency) {
-    auto result = L"See Quick Values - " + specialCurrencyNameW(currency);
+    auto result = L"This value is controlled by Global Values - " + specialCurrencyNameW(currency);
     if (!context.save) return result + L".";
     const auto* record = context.save->findRecord(currency.balanceKey, 0U);
     if (!record || record->elementCount == 0U) {
@@ -1550,9 +1609,8 @@ std::wstring specialCurrencyRedirectSummary(
     try {
         const auto bits = static_cast<std::uint32_t>(
             context.save->elementBits(currency.balanceKey, 0U, 0U));
-        if (currency.balanceKey == 0x045CU) {
-            result += L" balance: " +
-                std::to_wstring(bitCopy<std::int32_t>(bits));
+        if (currency.balanceKey == 0x0450U || currency.balanceKey == 0x045CU) {
+            result += L" balance: " + std::to_wstring(bitCopy<std::int32_t>(bits));
         } else {
             result += L" balance: " + std::to_wstring(bits);
         }
@@ -1560,6 +1618,13 @@ std::wstring specialCurrencyRedirectSummary(
         result += L" balance is unavailable";
     }
     return result + L".";
+}
+
+std::wstring curioItemRedirectSummary(const ItemEntryRedirect& redirect) {
+    const auto tier = gdtv::curioTierNumberForHash(redirect.itemHash);
+    std::wstring result = L"This Item entry is controlled by the Curios section";
+    if (tier != 0U) result += L" (T" + numberW(tier) + L")";
+    return result + L". Item Count, Item Flags, and Unknown Item Fields are disabled here.";
 }
 
 std::wstring logicalFamilyWindowTitle(const LogicalFamilyModDialogContext& context) {
@@ -1579,7 +1644,9 @@ std::wstring logicalFamilyEditSeed(const LogicalFamilyModDialogContext& context,
                                    std::size_t fieldIndex) {
     if (!context.family || fieldIndex >= context.family->fieldCount) return {};
     const auto& field = context.family->fields[fieldIndex];
-    if (redirectedItemCurrency(context, fieldIndex)) return L"See Quick Values";
+    const auto redirect = redirectedItemEntry(context, fieldIndex);
+    if (redirect.target == ItemEntryRedirectTarget::QuickValues) return L"See Global Values";
+    if (redirect.target == ItemEntryRedirectTarget::Curios) return L"See Curios";
     if (!gdtv::logicalFieldAvailable(*context.save, field, context.unitId)) return L"<not present>";
     const auto recordUnitId = gdtv::logicalFieldRecordUnitId(field, context.unitId);
     const auto bits = context.save->elementBits(field.key, recordUnitId, field.elementIndex);
@@ -1595,8 +1662,12 @@ std::wstring logicalFamilyValueSummary(const LogicalFamilyModDialogContext& cont
                                        std::size_t fieldIndex) {
     if (!context.family || fieldIndex >= context.family->fieldCount) return {};
     const auto& field = context.family->fields[fieldIndex];
-    if (const auto* currency = redirectedItemCurrency(context, fieldIndex)) {
-        return specialCurrencyRedirectSummary(context, *currency);
+    const auto redirect = redirectedItemEntry(context, fieldIndex);
+    if (redirect.target == ItemEntryRedirectTarget::QuickValues && redirect.currency) {
+        return specialCurrencyRedirectSummary(context, *redirect.currency);
+    }
+    if (redirect.target == ItemEntryRedirectTarget::Curios) {
+        return curioItemRedirectSummary(redirect);
     }
     if (!gdtv::logicalFieldAvailable(*context.save, field, context.unitId)) {
         return field.optional ? L"Optional section is not present in this save." : L"Required field is missing.";
@@ -1627,6 +1698,10 @@ std::wstring logicalFamilyValueSummary(const LogicalFamilyModDialogContext& cont
         }
         return result.empty() ? L"Known hash" : result;
     }
+    if (field.key == 0x07D3U) {
+        return L"Hex " + hexW(value, 8) + L" | raw " + rawLittleEndianW(value, 4U) +
+               L" | Auto: empty slot = 0; newly activated slot = previous active counter + 1.";
+    }
     if (field.kind == gdtv::LogicalValueKind::Bitfield ||
         field.kind == gdtv::LogicalValueKind::State) {
         unsigned count = 0U;
@@ -1645,16 +1720,22 @@ void refreshLogicalFamilyRow(LogicalFamilyModDialogContext& context,
                              std::size_t fieldIndex) {
     if (!context.family || fieldIndex >= context.family->fieldCount) return;
     const auto& field = context.family->fields[fieldIndex];
-    const bool redirected = redirectedItemCurrency(context, fieldIndex) != nullptr;
+    const auto redirect = redirectedItemEntry(context, fieldIndex);
+    const bool redirected = redirect.target != ItemEntryRedirectTarget::None;
     const bool available = gdtv::logicalFieldAvailable(*context.save, field, context.unitId);
     SetWindowTextW(context.edits[fieldIndex], logicalFamilyEditSeed(context, fieldIndex).c_str());
     SetWindowTextW(context.resolvedLabels[fieldIndex],
                    logicalFamilyValueSummary(context, fieldIndex).c_str());
     const bool editable = available && !redirected;
     EnableWindow(context.edits[fieldIndex], editable ? TRUE : FALSE);
-    EnableWindow(context.modButtons[fieldIndex], editable ? TRUE : FALSE);
     if (context.hashButtons[fieldIndex]) {
+        ShowWindow(context.hashButtons[fieldIndex], redirected ? SW_HIDE : SW_SHOW);
         EnableWindow(context.hashButtons[fieldIndex], editable ? TRUE : FALSE);
+    }
+    if (context.redirectButtons[fieldIndex]) {
+        SetWindowTextW(context.redirectButtons[fieldIndex], itemRedirectButtonText(redirect).c_str());
+        ShowWindow(context.redirectButtons[fieldIndex], redirected ? SW_SHOW : SW_HIDE);
+        EnableWindow(context.redirectButtons[fieldIndex], redirected ? TRUE : FALSE);
     }
 }
 
@@ -1679,50 +1760,81 @@ void selectLogicalFamilyEntryInModWindow(LogicalFamilyModDialogContext& context,
     SetForegroundWindow(context.window);
 }
 
-bool applyLogicalFamilyField(LogicalFamilyModDialogContext& context,
-                             std::size_t fieldIndex) {
-    if (!context.family || fieldIndex >= context.family->fieldCount) return false;
-    const auto& field = context.family->fields[fieldIndex];
-    if (redirectedItemCurrency(context, fieldIndex)) return false;
-    if (!gdtv::logicalFieldAvailable(*context.save, field, context.unitId)) return false;
-    std::wstring error;
-    const auto value = parseSummonModValue(getWindowTextString(context.edits[fieldIndex]),
-                                           field, *context.hashDatabase, error);
+bool applyLogicalFamilyAll(LogicalFamilyModDialogContext& context) {
+    if (!context.family) return false;
+    std::array<std::optional<std::uint64_t>, kMaxSharedLogicalFields> values{};
     const auto dialogTitle = utf8ToWide(std::string(context.family->name)) + L" MOD";
-    if (!value) {
-        MessageBoxW(context.window, error.c_str(), dialogTitle.c_str(), MB_OK | MB_ICONERROR);
-        return false;
-    }
-    if (field.kind == gdtv::LogicalValueKind::Hash) {
-        const auto hash = static_cast<std::uint32_t>(*value);
-        const auto category = !field.hashCategoryFilter.empty()
-            ? field.hashCategoryFilter : context.family->hashCategoryFilter;
-        const bool sentinel = hash == 0U || hash == 0xFFFFFFFFU || gdtv::isGlobalEmptySlotHash(hash);
-        if (!category.empty() && !sentinel && context.hashDatabase->find(hash) &&
-            !context.hashDatabase->hasMatchingEntry(hash, category, {})) {
-            const auto warning = L"The selected hash is known, but it is not categorized as " +
-                utf8ToWide(std::string(category)) +
-                L". Continue writing it to this logical field?";
-            if (MessageBoxW(context.window, warning.c_str(), dialogTitle.c_str(),
-                            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
-                return false;
+    bool prospectiveProtectedItem = false;
+    const bool curioEdit = context.family->grouping ==
+        gdtv::LogicalGroupingKind::CurioSlotEntries;
+    const auto curioAddress = curioEdit
+        ? gdtv::decodeLogicalUnitId(*context.family, context.unitId)
+        : gdtv::LogicalUnitAddress{};
+    const bool curioSlotWasEmpty = curioEdit && curioAddress.valid &&
+        !gdtv::curioSlotHasRewards(*context.save, curioAddress.slot);
+
+    for (std::size_t fieldIndex = 0; fieldIndex < context.family->fieldCount; ++fieldIndex) {
+        const auto& field = context.family->fields[fieldIndex];
+        if ((fieldIndex > 0U && prospectiveProtectedItem) ||
+            redirectedItemEntry(context, fieldIndex).target != ItemEntryRedirectTarget::None ||
+            !gdtv::logicalFieldAvailable(*context.save, field, context.unitId)) {
+            continue;
+        }
+        std::wstring error;
+        const auto value = parseSummonModValue(getWindowTextString(context.edits[fieldIndex]),
+                                               field, *context.hashDatabase, error);
+        if (!value) {
+            const auto message = utf8ToWide(std::string(field.label)) + L": " + error;
+            MessageBoxW(context.window, message.c_str(), dialogTitle.c_str(),
+                        MB_OK | MB_ICONERROR);
+            return false;
+        }
+        if (field.kind == gdtv::LogicalValueKind::Hash) {
+            const auto hash = static_cast<std::uint32_t>(*value);
+            const auto category = !field.hashCategoryFilter.empty()
+                ? field.hashCategoryFilter : context.family->hashCategoryFilter;
+            const bool sentinel = hash == 0U || hash == 0xFFFFFFFFU ||
+                                  gdtv::isGlobalEmptySlotHash(hash);
+            if (!category.empty() && !sentinel && context.hashDatabase->find(hash) &&
+                !context.hashDatabase->hasMatchingEntry(hash, category, {})) {
+                const auto warning = utf8ToWide(std::string(field.label)) +
+                    L" is a known hash, but it is not categorized as " +
+                    utf8ToWide(std::string(category)) + L". Continue?";
+                if (MessageBoxW(context.window, warning.c_str(), dialogTitle.c_str(),
+                                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+                    return false;
+                }
             }
         }
+        values[fieldIndex] = *value;
+        if (context.family->anchorKey == gdtv::itemsFamily().anchorKey && fieldIndex == 0U) {
+            prospectiveProtectedItem = gdtv::isProtectedBulkItemHash(
+                static_cast<std::uint32_t>(*value));
+        }
     }
+
     try {
-        const auto recordUnitId = gdtv::logicalFieldRecordUnitId(field, context.unitId);
-        context.save->setElementBits(field.key, recordUnitId, field.elementIndex, *value);
+        for (std::size_t fieldIndex = 0; fieldIndex < context.family->fieldCount; ++fieldIndex) {
+            if (!values[fieldIndex]) continue;
+            const auto& field = context.family->fields[fieldIndex];
+            const auto recordUnitId = gdtv::logicalFieldRecordUnitId(field, context.unitId);
+            context.save->setElementBits(field.key, recordUnitId,
+                                         field.elementIndex, *values[fieldIndex]);
+        }
+
+        if (curioEdit && curioAddress.valid) {
+            (void)gdtv::normalizeCurioSlotAfterRewardEdit(
+                *context.save, curioAddress.slot, context.unitId, curioSlotWasEmpty);
+        }
         context.changed = true;
-        if (context.family->anchorKey == gdtv::itemsFamily().anchorKey && field.key == 0x0709U) {
-            for (std::size_t index = 0U; index < context.family->fieldCount; ++index) {
-                refreshLogicalFamilyRow(context, index);
-            }
-        } else {
+        for (std::size_t fieldIndex = 0; fieldIndex < context.family->fieldCount; ++fieldIndex) {
             refreshLogicalFamilyRow(context, fieldIndex);
         }
-        const auto message = legacyLocatorW(field.key) +
-            L" modified in memory. Use File > Save Edited ... As.";
-        SetWindowTextW(context.statusLabel, message.c_str());
+        SetWindowTextW(
+            context.statusLabel,
+            curioEdit
+                ? L"Curio values were modified in memory. Empty slots use counter 0; newly activated slots continue the previous counter sequence. Use File > Save Edited ... As."
+                : L"All editable values were modified in memory. Use File > Save Edited ... As.");
         return true;
     } catch (const std::exception& exception) {
         MessageBoxW(context.window, utf8ToWide(exception.what()).c_str(), dialogTitle.c_str(),
@@ -1762,18 +1874,19 @@ LRESULT CALLBACK logicalFamilyModDialogProc(HWND hwnd, UINT message, WPARAM wPar
                              18, y, 338, 24, 0, context->font);
             context->edits[index] = addDialogControl(
                 hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL,
-                360, y - 3, 170, 28, ID_LOGICAL_EDIT_BASE + static_cast<UINT>(index),
+                360, y - 3, 222, 28, ID_LOGICAL_EDIT_BASE + static_cast<UINT>(index),
                 context->font, WS_EX_CLIENTEDGE);
-            context->modButtons[index] = addDialogControl(
-                hwnd, L"BUTTON", L"MOD", WS_TABSTOP | BS_PUSHBUTTON,
-                540, y - 3, 68, 28,
-                ID_LOGICAL_MOD_BASE + static_cast<UINT>(index), context->font);
             if (field.kind == gdtv::LogicalValueKind::Hash) {
                 context->hashButtons[index] = addDialogControl(
                     hwnd, L"BUTTON", L"Hash List", WS_TABSTOP | BS_PUSHBUTTON,
-                    618, y - 3, 100, 28,
+                    592, y - 3, 126, 28,
                     ID_LOGICAL_HASH_BASE + static_cast<UINT>(index), context->font);
             }
+            context->redirectButtons[index] = addDialogControl(
+                hwnd, L"BUTTON", L"", WS_TABSTOP | BS_PUSHBUTTON,
+                592, y - 3, 126, 28,
+                ID_LOGICAL_REDIRECT_BASE + static_cast<UINT>(index), context->font);
+            ShowWindow(context->redirectButtons[index], SW_HIDE);
             context->resolvedLabels[index] = addDialogControl(
                 hwnd, L"STATIC", L"", SS_LEFT,
                 360, y + 29, 358, 30, 0, context->font);
@@ -1782,17 +1895,30 @@ LRESULT CALLBACK logicalFamilyModDialogProc(HWND hwnd, UINT message, WPARAM wPar
 
         const int statusY = 62 + static_cast<int>(context->family->fieldCount) * 72;
         context->statusLabel = addDialogControl(
-            hwnd, L"STATIC", L"Values are edited in memory until Save Edited ... As is used.",
-            SS_LEFT, 18, statusY, 548, 38, 0, context->font);
-        addDialogControl(hwnd, L"BUTTON", L"Close", WS_TABSTOP | BS_DEFPUSHBUTTON,
+            hwnd, L"STATIC", L"Press MOD to write every editable value shown above to memory.",
+            SS_LEFT, 18, statusY, 460, 38, 0, context->font);
+        addDialogControl(hwnd, L"BUTTON", L"MOD", WS_TABSTOP | BS_DEFPUSHBUTTON,
+                         532, statusY + 6, 88, 30, ID_LOGICAL_APPLY, context->font);
+        addDialogControl(hwnd, L"BUTTON", L"Close", WS_TABSTOP | BS_PUSHBUTTON,
                          630, statusY + 6, 88, 30, IDCANCEL, context->font);
         return 0;
     }
     case WM_COMMAND: {
         const auto id = LOWORD(wParam);
-        if (id >= ID_LOGICAL_MOD_BASE &&
-            id < ID_LOGICAL_MOD_BASE + static_cast<UINT>(context->family->fieldCount)) {
-            applyLogicalFamilyField(*context, id - ID_LOGICAL_MOD_BASE);
+        if (id == ID_LOGICAL_APPLY) {
+            applyLogicalFamilyAll(*context);
+            return 0;
+        }
+        if (id >= ID_LOGICAL_REDIRECT_BASE &&
+            id < ID_LOGICAL_REDIRECT_BASE + static_cast<UINT>(context->family->fieldCount)) {
+            const auto fieldIndex = static_cast<std::size_t>(id - ID_LOGICAL_REDIRECT_BASE);
+            const auto redirect = redirectedItemEntry(*context, fieldIndex);
+            if (redirect.target != ItemEntryRedirectTarget::None && context->owner) {
+                PostMessageW(context->owner, WM_APP_FOCUS_LOGICAL_FAMILY,
+                             static_cast<WPARAM>(redirect.familyAnchor),
+                             reinterpret_cast<LPARAM>(context->save));
+                DestroyWindow(hwnd);
+            }
             return 0;
         }
         if (id >= ID_LOGICAL_HASH_BASE &&
@@ -1883,6 +2009,373 @@ HWND createLogicalFamilyModWindow(HWND owner, LogicalFamilyModDialogContext& con
     return dialog;
 }
 
+
+struct BulkLogicalModDialogContext {
+    HWND owner{};
+    HWND window{};
+    HWND warningLabel{};
+    HWND statusLabel{};
+    HFONT font{};
+    HFONT warningFont{};
+    gdtv::SaveData* save{};
+    const gdtv::HashDatabase* hashDatabase{};
+    const gdtv::LogicalFamilyDefinition* family{};
+    std::vector<std::uint32_t> unitIds;
+    std::wstring scopeLabel;
+    bool changed{};
+    bool suppressCloseNotification{};
+    std::array<bool, kMaxSharedLogicalFields> enabled{};
+    std::array<HWND, kMaxSharedLogicalFields> edits{};
+    std::array<HWND, kMaxSharedLogicalFields> toggleButtons{};
+    std::array<HWND, kMaxSharedLogicalFields> hashButtons{};
+    std::array<HWND, kMaxSharedLogicalFields> resolvedLabels{};
+};
+
+constexpr UINT ID_BULK_EDIT_BASE = 4300;
+constexpr UINT ID_BULK_TOGGLE_BASE = 4400;
+constexpr UINT ID_BULK_HASH_BASE = 4500;
+constexpr UINT ID_BULK_APPLY = 4600;
+
+std::wstring bulkLogicalTitle(const BulkLogicalModDialogContext& context) {
+    if (!context.family) return L"Bulk MOD";
+    auto title = utf8ToWide(std::string(context.family->name)) + L" - Bulk MOD";
+    if (!context.scopeLabel.empty()) title += L" - " + context.scopeLabel;
+    return title;
+}
+
+std::optional<std::uint32_t> bulkFirstUnitForField(
+    const BulkLogicalModDialogContext& context, std::size_t fieldIndex) {
+    if (!context.family || !context.save || fieldIndex >= context.family->fieldCount) {
+        return std::nullopt;
+    }
+    const auto& field = context.family->fields[fieldIndex];
+    for (const auto unitId : context.unitIds) {
+        if (gdtv::logicalFieldAvailable(*context.save, field, unitId)) return unitId;
+    }
+    return std::nullopt;
+}
+
+std::wstring bulkLogicalEditSeed(const BulkLogicalModDialogContext& context,
+                                 std::size_t fieldIndex) {
+    const auto firstUnit = bulkFirstUnitForField(context, fieldIndex);
+    if (!firstUnit || !context.family || !context.save) return L"<not present>";
+    const auto& field = context.family->fields[fieldIndex];
+    const auto recordUnitId = gdtv::logicalFieldRecordUnitId(field, *firstUnit);
+    const auto bits = context.save->elementBits(field.key, recordUnitId, field.elementIndex);
+    if (field.kind == gdtv::LogicalValueKind::Hash) return hexW(bits, 8);
+    if (field.kind == gdtv::LogicalValueKind::Signed ||
+        field.kind == gdtv::LogicalValueKind::Bitfield) {
+        return std::to_wstring(bitCopy<std::int32_t>(static_cast<std::uint32_t>(bits)));
+    }
+    return std::to_wstring(bits);
+}
+
+std::wstring bulkLogicalValueSummary(const BulkLogicalModDialogContext& context,
+                                     std::size_t fieldIndex) {
+    if (!context.enabled[fieldIndex]) return L"Excluded from editing (default).";
+    const auto firstUnit = bulkFirstUnitForField(context, fieldIndex);
+    if (!firstUnit || !context.family || !context.save) return L"Not present in the selected slots.";
+    const auto& field = context.family->fields[fieldIndex];
+    const auto recordUnitId = gdtv::logicalFieldRecordUnitId(field, *firstUnit);
+    const auto value = static_cast<std::uint32_t>(
+        context.save->elementBits(field.key, recordUnitId, field.elementIndex));
+    if (field.kind == gdtv::LogicalValueKind::Hash && context.hashDatabase) {
+        const auto* entry = context.hashDatabase->preferred(value);
+        if (!entry) return L"First non-empty slot: unknown hash. Other slots may differ.";
+        std::wstring result = L"First non-empty slot: ";
+        if (!entry->displayName.empty()) result += utf8ToWide(entry->displayName);
+        if (!entry->id.empty()) {
+            if (result.back() != L' ') result += L" | ";
+            result += utf8ToWide(entry->id);
+        }
+        result += L". Other slots may differ.";
+        return result;
+    }
+    return L"The entered value will be written to every selected non-empty slot.";
+}
+
+void refreshBulkLogicalRow(BulkLogicalModDialogContext& context,
+                           std::size_t fieldIndex, bool resetSeed = false) {
+    if (!context.family || fieldIndex >= context.family->fieldCount) return;
+    const bool available = bulkFirstUnitForField(context, fieldIndex).has_value();
+    if (resetSeed) {
+        SetWindowTextW(context.edits[fieldIndex],
+                       bulkLogicalEditSeed(context, fieldIndex).c_str());
+    }
+    const bool active = available && context.enabled[fieldIndex];
+    SetWindowTextW(context.toggleButtons[fieldIndex], active ? L"ON" : L"OFF");
+    EnableWindow(context.toggleButtons[fieldIndex], available ? TRUE : FALSE);
+    EnableWindow(context.edits[fieldIndex], active ? TRUE : FALSE);
+    if (context.hashButtons[fieldIndex]) {
+        EnableWindow(context.hashButtons[fieldIndex], active ? TRUE : FALSE);
+    }
+    SetWindowTextW(context.resolvedLabels[fieldIndex],
+                   bulkLogicalValueSummary(context, fieldIndex).c_str());
+}
+
+bool applyBulkLogicalFields(BulkLogicalModDialogContext& context) {
+    if (!context.family || !context.save || context.unitIds.empty()) return false;
+    std::array<std::optional<std::uint64_t>, kMaxSharedLogicalFields> values{};
+    bool anyEnabled = false;
+    const auto title = bulkLogicalTitle(context);
+
+    for (std::size_t fieldIndex = 0; fieldIndex < context.family->fieldCount; ++fieldIndex) {
+        if (!context.enabled[fieldIndex]) continue;
+        anyEnabled = true;
+        const auto& field = context.family->fields[fieldIndex];
+        std::wstring error;
+        const auto value = parseSummonModValue(getWindowTextString(context.edits[fieldIndex]),
+                                               field, *context.hashDatabase, error);
+        if (!value) {
+            const auto message = utf8ToWide(std::string(field.label)) + L": " + error;
+            MessageBoxW(context.window, message.c_str(), title.c_str(), MB_OK | MB_ICONERROR);
+            return false;
+        }
+        if (field.kind == gdtv::LogicalValueKind::Hash) {
+            const auto hash = static_cast<std::uint32_t>(*value);
+            const auto category = !field.hashCategoryFilter.empty()
+                ? field.hashCategoryFilter : context.family->hashCategoryFilter;
+            const bool sentinel = hash == 0U || hash == 0xFFFFFFFFU ||
+                                  gdtv::isGlobalEmptySlotHash(hash);
+            if (!category.empty() && !sentinel && context.hashDatabase->find(hash) &&
+                !context.hashDatabase->hasMatchingEntry(hash, category, {})) {
+                const auto warning = utf8ToWide(std::string(field.label)) +
+                    L" is a known hash, but it is not categorized as " +
+                    utf8ToWide(std::string(category)) + L". Continue?";
+                if (MessageBoxW(context.window, warning.c_str(), title.c_str(),
+                                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+                    return false;
+                }
+            }
+        }
+        values[fieldIndex] = *value;
+    }
+
+    if (!anyEnabled) {
+        MessageBoxW(context.window,
+                    L"Every option is OFF. Turn ON at least one option before pressing MOD.",
+                    title.c_str(), MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
+
+    const auto confirmation = L"This will modify " + numberW(context.unitIds.size()) +
+        L" non-empty slot(s). Only options currently set to ON will be changed. Continue?";
+    if (MessageBoxW(context.window, confirmation.c_str(), title.c_str(),
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+        return false;
+    }
+
+    try {
+        std::uint64_t writes = 0U;
+        for (const auto unitId : context.unitIds) {
+            for (std::size_t fieldIndex = 0; fieldIndex < context.family->fieldCount; ++fieldIndex) {
+                if (!values[fieldIndex]) continue;
+                const auto& field = context.family->fields[fieldIndex];
+                if (!gdtv::logicalFieldAvailable(*context.save, field, unitId)) continue;
+                const auto recordUnitId = gdtv::logicalFieldRecordUnitId(field, unitId);
+                context.save->setElementBits(field.key, recordUnitId,
+                                             field.elementIndex, *values[fieldIndex]);
+                ++writes;
+            }
+        }
+        context.changed = writes != 0U;
+        SetWindowTextW(context.statusLabel,
+                       (numberW(writes) + L" value(s) modified in memory. Use File > Save Edited ... As.").c_str());
+        return writes != 0U;
+    } catch (const std::exception& exception) {
+        MessageBoxW(context.window, utf8ToWide(exception.what()).c_str(), title.c_str(),
+                    MB_OK | MB_ICONERROR);
+        return false;
+    }
+}
+
+LRESULT CALLBACK bulkLogicalModDialogProc(HWND hwnd, UINT message,
+                                          WPARAM wParam, LPARAM lParam) {
+    auto* context = reinterpret_cast<BulkLogicalModDialogContext*>(
+        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        context = static_cast<BulkLogicalModDialogContext*>(create->lpCreateParams);
+        context->window = hwnd;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(context));
+    }
+    if (!context) return DefWindowProcW(hwnd, message, wParam, lParam);
+
+    switch (message) {
+    case WM_CREATE: {
+        if (!context->family || context->family->fieldCount > kMaxSharedLogicalFields) return -1;
+        context->font = CreateFontW(-17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        context->warningFont = CreateFontW(-18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                           CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        const auto title = bulkLogicalTitle(*context);
+        SetWindowTextW(hwnd, title.c_str());
+        addDialogControl(hwnd, L"STATIC", title.c_str(), SS_LEFT,
+                         16, 12, 748, 26, 0, context->font);
+        context->warningLabel = addDialogControl(
+            hwnd, L"STATIC",
+            L"WARNING: Using this MOD section will affect ALL non-empty slots in this group.",
+            SS_LEFT, 16, 42, 748, 28, 0, context->warningFont);
+        addDialogControl(
+            hwnd, L"STATIC",
+            L"Every option starts OFF. Turn ON only the fields you want changed; OFF fields stay untouched.",
+            SS_LEFT, 16, 70, 748, 24, 0, context->font);
+
+        for (std::size_t index = 0; index < context->family->fieldCount; ++index) {
+            const auto& field = context->family->fields[index];
+            const int y = 108 + static_cast<int>(index) * 72;
+            const auto label = legacyLocatorW(field.key) + L" - " +
+                               utf8ToWide(std::string(field.label));
+            addDialogControl(hwnd, L"STATIC", label.c_str(), SS_LEFT,
+                             18, y, 310, 24, 0, context->font);
+            context->toggleButtons[index] = addDialogControl(
+                hwnd, L"BUTTON", L"OFF", WS_TABSTOP | BS_PUSHBUTTON,
+                332, y - 3, 58, 28, ID_BULK_TOGGLE_BASE + static_cast<UINT>(index),
+                context->font);
+            context->edits[index] = addDialogControl(
+                hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL,
+                400, y - 3, 214, 28, ID_BULK_EDIT_BASE + static_cast<UINT>(index),
+                context->font, WS_EX_CLIENTEDGE);
+            if (field.kind == gdtv::LogicalValueKind::Hash) {
+                context->hashButtons[index] = addDialogControl(
+                    hwnd, L"BUTTON", L"Hash List", WS_TABSTOP | BS_PUSHBUTTON,
+                    624, y - 3, 120, 28,
+                    ID_BULK_HASH_BASE + static_cast<UINT>(index), context->font);
+            }
+            context->resolvedLabels[index] = addDialogControl(
+                hwnd, L"STATIC", L"", SS_LEFT,
+                400, y + 29, 344, 30, 0, context->font);
+            refreshBulkLogicalRow(*context, index, true);
+        }
+
+        const int statusY = 118 + static_cast<int>(context->family->fieldCount) * 72;
+        context->statusLabel = addDialogControl(
+            hwnd, L"STATIC", L"No fields are enabled. No memory changes have been made.",
+            SS_LEFT, 18, statusY, 500, 38, 0, context->font);
+        addDialogControl(hwnd, L"BUTTON", L"MOD", WS_TABSTOP | BS_DEFPUSHBUTTON,
+                         562, statusY + 6, 88, 30, ID_BULK_APPLY, context->font);
+        addDialogControl(hwnd, L"BUTTON", L"Close", WS_TABSTOP | BS_PUSHBUTTON,
+                         660, statusY + 6, 88, 30, IDCANCEL, context->font);
+        return 0;
+    }
+    case WM_CTLCOLORSTATIC: {
+        if (reinterpret_cast<HWND>(lParam) == context->warningLabel) {
+            const auto dc = reinterpret_cast<HDC>(wParam);
+            SetTextColor(dc, RGB(196, 0, 0));
+            SetBkMode(dc, TRANSPARENT);
+            return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
+        }
+        break;
+    }
+    case WM_COMMAND: {
+        const auto id = LOWORD(wParam);
+        if (id >= ID_BULK_TOGGLE_BASE &&
+            id < ID_BULK_TOGGLE_BASE + static_cast<UINT>(context->family->fieldCount)) {
+            const auto fieldIndex = static_cast<std::size_t>(id - ID_BULK_TOGGLE_BASE);
+            if (bulkFirstUnitForField(*context, fieldIndex)) {
+                context->enabled[fieldIndex] = !context->enabled[fieldIndex];
+                refreshBulkLogicalRow(*context, fieldIndex, false);
+            }
+            return 0;
+        }
+        if (id >= ID_BULK_HASH_BASE &&
+            id < ID_BULK_HASH_BASE + static_cast<UINT>(context->family->fieldCount)) {
+            const auto fieldIndex = static_cast<std::size_t>(id - ID_BULK_HASH_BASE);
+            if (!context->enabled[fieldIndex]) return 0;
+            const auto& field = context->family->fields[fieldIndex];
+            const auto title = utf8ToWide(std::string(field.label)) + L" - Hash List";
+            const auto category = !field.hashCategoryFilter.empty()
+                ? field.hashCategoryFilter : context->family->hashCategoryFilter;
+            const auto categoryPrefix = !field.hashCategoryFilter.empty()
+                ? field.hashCategoryPrefix : context->family->hashCategoryPrefix;
+            EnableWindow(context->owner, FALSE);
+            const auto selected = showHashListDialog(
+                hwnd, *context->hashDatabase, category,
+                title.c_str(), categoryPrefix, nullptr);
+            EnableWindow(context->owner, TRUE);
+            SetForegroundWindow(hwnd);
+            if (selected) {
+                SetWindowTextW(context->edits[fieldIndex], hexW(*selected, 8).c_str());
+                SendMessageW(context->edits[fieldIndex], EM_SETSEL, 0, -1);
+                SetFocus(context->edits[fieldIndex]);
+            }
+            return 0;
+        }
+        if (id == ID_BULK_APPLY) {
+            applyBulkLogicalFields(*context);
+            return 0;
+        }
+        if (id == IDCANCEL) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        if (context->warningFont) {
+            DeleteObject(context->warningFont);
+            context->warningFont = nullptr;
+        }
+        if (context->font) {
+            DeleteObject(context->font);
+            context->font = nullptr;
+        }
+        context->window = nullptr;
+        if (!context->suppressCloseNotification && context->owner) {
+            PostMessageW(context->owner, WM_APP_BULK_MOD_CLOSED,
+                         context->changed ? 1U : 0U, 0);
+        }
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+HWND createBulkLogicalModWindow(HWND owner, BulkLogicalModDialogContext& context) {
+    constexpr wchar_t className[] = L"GBFRToolBulkLogicalModDialog";
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = bulkLogicalModDialogProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.lpszClassName = className;
+        registered = RegisterClassExW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    }
+    if (!registered || !context.family || context.family->fieldCount > kMaxSharedLogicalFields ||
+        context.unitIds.empty()) {
+        return nullptr;
+    }
+
+    RECT ownerRect{};
+    GetWindowRect(owner, &ownerRect);
+    constexpr int width = 790;
+    const int height = 230 + static_cast<int>(context.family->fieldCount) * 72;
+    const int x = static_cast<int>(ownerRect.left) +
+                  std::max(0, (static_cast<int>(ownerRect.right - ownerRect.left) - width) / 2);
+    const int y = static_cast<int>(ownerRect.top) +
+                  std::max(0, (static_cast<int>(ownerRect.bottom - ownerRect.top) - height) / 2);
+
+    context.owner = owner;
+    const auto title = bulkLogicalTitle(context);
+    HWND dialog = CreateWindowExW(WS_EX_TOOLWINDOW, className, title.c_str(),
+                                  WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                                  x, y, width, height, owner, nullptr,
+                                  GetModuleHandleW(nullptr), &context);
+    if (!dialog) return nullptr;
+    ShowWindow(dialog, SW_SHOW);
+    UpdateWindow(dialog);
+    return dialog;
+}
+
 enum class Role { Primary, Compare };
 enum class NodeKind {
     Dummy,
@@ -1953,6 +2446,161 @@ struct NodeData {
     std::size_t relationshipIndex{};
     std::size_t relationshipSubIndex{};
 };
+
+struct SearchMatch {
+    enum class Kind { RawSection, LogicalUnit };
+    Kind kind{Kind::LogicalUnit};
+    Role role{Role::Primary};
+    gdtv::SaveData* save{};
+    std::uint32_t key{};
+    std::uint32_t familyAnchor{};
+    std::uint32_t unitId{};
+    std::wstring label;
+    std::wstring matchedRow;
+};
+
+constexpr UINT ID_SECTION_SEARCH_EDIT = 6100;
+constexpr UINT ID_SECTION_SEARCH_RUN = 6101;
+constexpr UINT ID_SECTION_SEARCH_PREVIOUS = 6102;
+constexpr UINT ID_SECTION_SEARCH_NEXT = 6103;
+
+struct SectionSearchDialogContext {
+    HWND owner{};
+    HWND window{};
+    HWND edit{};
+    HWND positionLabel{};
+    HWND resultLabel{};
+    HFONT font{};
+    std::wstring title;
+    std::vector<SearchMatch> results;
+    std::size_t current{};
+    std::function<std::vector<SearchMatch>(const std::wstring&)> search;
+    std::function<void(const std::vector<SearchMatch>&, std::size_t)> activate;
+};
+
+void refreshSectionSearchDialog(SectionSearchDialogContext& context) {
+    if (!context.positionLabel || !context.resultLabel) return;
+    if (context.results.empty()) {
+        SetWindowTextW(context.positionLabel, L"0/0");
+        SetWindowTextW(context.resultLabel, L"No matches in this section.");
+        return;
+    }
+    if (context.current >= context.results.size()) context.current = 0U;
+    const auto position = numberW(context.current + 1U) + L"/" + numberW(context.results.size());
+    SetWindowTextW(context.positionLabel, position.c_str());
+    const auto& result = context.results[context.current];
+    auto text = result.label;
+    if (!result.matchedRow.empty()) text += L"\r\n" + result.matchedRow;
+    SetWindowTextW(context.resultLabel, text.c_str());
+}
+
+LRESULT CALLBACK sectionSearchDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* context = reinterpret_cast<SectionSearchDialogContext*>(
+        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        context = static_cast<SectionSearchDialogContext*>(create->lpCreateParams);
+        context->window = hwnd;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(context));
+    }
+    if (!context) return DefWindowProcW(hwnd, message, wParam, lParam);
+
+    switch (message) {
+    case WM_CREATE:
+        context->font = CreateFontW(-17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        addDialogControl(hwnd, L"STATIC",
+            L"Search HASH[BE], HASH[LE], TYPE, INGAMENAME, or INTERNALNAME:",
+            SS_LEFT, 14, 14, 610, 24, 0, context->font);
+        context->edit = addDialogControl(hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL,
+                                         14, 42, 505, 28, ID_SECTION_SEARCH_EDIT,
+                                         context->font, WS_EX_CLIENTEDGE);
+        addDialogControl(hwnd, L"BUTTON", L"Search", WS_TABSTOP | BS_DEFPUSHBUTTON,
+                         529, 42, 95, 28, ID_SECTION_SEARCH_RUN, context->font);
+        addDialogControl(hwnd, L"BUTTON", L"Previous", WS_TABSTOP | BS_PUSHBUTTON,
+                         14, 82, 90, 28, ID_SECTION_SEARCH_PREVIOUS, context->font);
+        context->positionLabel = addDialogControl(hwnd, L"STATIC", L"0/0",
+                                                   SS_LEFT, 111, 86, 92, 24, 0, context->font);
+        addDialogControl(hwnd, L"BUTTON", L"Next", WS_TABSTOP | BS_PUSHBUTTON,
+                         210, 82, 90, 28, ID_SECTION_SEARCH_NEXT, context->font);
+        context->resultLabel = addDialogControl(hwnd, L"STATIC", L"Enter a search term.",
+                                                 SS_LEFT, 14, 122, 610, 78, 0, context->font,
+                                                 WS_EX_CLIENTEDGE);
+        addDialogControl(hwnd, L"BUTTON", L"Close", WS_TABSTOP | BS_PUSHBUTTON,
+                         529, 210, 95, 30, IDCANCEL, context->font);
+        SetFocus(context->edit);
+        return 0;
+    case WM_COMMAND: {
+        const auto id = LOWORD(wParam);
+        if (id == ID_SECTION_SEARCH_RUN) {
+            const auto query = getWindowTextString(context->edit);
+            context->results = context->search ? context->search(query) : std::vector<SearchMatch>{};
+            context->current = 0U;
+            refreshSectionSearchDialog(*context);
+            if (!context->results.empty() && context->activate) {
+                context->activate(context->results, context->current);
+            }
+            return 0;
+        }
+        if ((id == ID_SECTION_SEARCH_PREVIOUS || id == ID_SECTION_SEARCH_NEXT) &&
+            !context->results.empty()) {
+            if (id == ID_SECTION_SEARCH_PREVIOUS) {
+                context->current = context->current == 0U
+                    ? context->results.size() - 1U : context->current - 1U;
+            } else {
+                context->current = (context->current + 1U) % context->results.size();
+            }
+            refreshSectionSearchDialog(*context);
+            if (context->activate) context->activate(context->results, context->current);
+            return 0;
+        }
+        if (id == IDCANCEL) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        if (context->font) {
+            DeleteObject(context->font);
+            context->font = nullptr;
+        }
+        context->window = nullptr;
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+HWND createSectionSearchWindow(HWND owner, SectionSearchDialogContext& context) {
+    constexpr wchar_t className[] = L"GBFRToolSectionSearchDialog";
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = sectionSearchDialogProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        wc.lpszClassName = className;
+        if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return nullptr;
+        registered = true;
+    }
+    context.owner = owner;
+    HWND dialog = CreateWindowExW(WS_EX_TOOLWINDOW, className, context.title.c_str(),
+                                  WS_OVERLAPPEDWINDOW,
+                                  CW_USEDEFAULT, CW_USEDEFAULT, 660, 295,
+                                  owner, nullptr, GetModuleHandleW(nullptr), &context);
+    if (!dialog) return nullptr;
+    ShowWindow(dialog, SW_SHOW);
+    UpdateWindow(dialog);
+    return dialog;
+}
 
 struct RelationshipCache {
     std::vector<gdtv::PhysicalSectionInfo> physical;
@@ -2041,6 +2689,9 @@ private:
     HWND searchEdit_{};
     HWND searchButton_{};
     HWND clearSearchButton_{};
+    HWND previousSearchButton_{};
+    HWND searchPositionLabel_{};
+    HWND nextSearchButton_{};
     HWND tree_{};
     HWND copyLocatorButton_{};
     HWND exportButton_{};
@@ -2054,6 +2705,8 @@ private:
     HWND summonModWindow_{};
     HWND masteryModWindow_{};
     HWND logicalModWindow_{};
+    HWND bulkModWindow_{};
+    HWND sectionSearchWindow_{};
     HFONT uiFont_{};
     HFONT monoFont_{};
 
@@ -2062,6 +2715,8 @@ private:
     std::unique_ptr<SummonSlotModDialogContext> summonModContext_;
     std::unique_ptr<MasteryTreeModDialogContext> masteryModContext_;
     std::unique_ptr<LogicalFamilyModDialogContext> logicalModContext_;
+    std::unique_ptr<BulkLogicalModDialogContext> bulkModContext_;
+    std::unique_ptr<SectionSearchDialogContext> sectionSearchContext_;
     gdtv::SectionMap sectionMap_;
     gdtv::SectionNameMap sectionNames_;
     gdtv::CharacterSectionMap characterSections_;
@@ -2070,7 +2725,8 @@ private:
     std::filesystem::path characterSectionsPath_;
     std::filesystem::path sectionNamesPath_;
     std::vector<std::unique_ptr<NodeData>> nodes_;
-    std::vector<std::pair<Role, std::uint32_t>> searchResults_;
+    std::vector<SearchMatch> searchResults_;
+    std::size_t currentSearchResult_{};
     std::array<std::vector<std::uint32_t>, 4> compareKeys_;
     std::map<const gdtv::SaveData*, RelationshipCache> relationshipCaches_;
     bool showDetailedLogicalInfo_{};
@@ -2142,6 +2798,22 @@ private:
             }
             return 0;
         }
+        case WM_APP_BULK_MOD_CLOSED: {
+            const bool changed = wParam != 0U;
+            bulkModWindow_ = nullptr;
+            bulkModContext_.reset();
+            if (changed) {
+                rebuildTree();
+                setStatus(L"Bulk edits are in memory - use File > Save Edited ... As");
+            }
+            return 0;
+        }
+        case WM_APP_FOCUS_LOGICAL_FAMILY: {
+            auto* save = reinterpret_cast<gdtv::SaveData*>(lParam);
+            const auto anchor = static_cast<std::uint32_t>(wParam);
+            focusLogicalFamily(save, anchor);
+            return 0;
+        }
         case WM_SETFOCUS:
             SetFocus(tree_);
             return 0;
@@ -2152,6 +2824,8 @@ private:
             closeSummonModWindow();
             closeMasteryModWindow();
             closeLogicalModWindow();
+            closeBulkModWindow();
+            closeSectionSearchWindow();
             DragAcceptFiles(hwnd_, FALSE);
             if (uiFont_) DeleteObject(uiFont_);
             if (monoFont_) DeleteObject(monoFont_);
@@ -2185,8 +2859,14 @@ private:
                                       ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd_, controlId(ID_EDIT_SEARCH),
                                       instance_, nullptr);
         searchButton_ = createControl(L"BUTTON", L"Search", WS_TABSTOP | BS_PUSHBUTTON, ID_BTN_SEARCH);
-        clearSearchButton_ = createControl(L"BUTTON", L"Clear Results", WS_TABSTOP | BS_PUSHBUTTON,
+        clearSearchButton_ = createControl(L"BUTTON", L"Clear", WS_TABSTOP | BS_PUSHBUTTON,
                                            ID_BTN_CLEAR_SEARCH);
+        previousSearchButton_ = createControl(L"BUTTON", L"Previous", WS_TABSTOP | BS_PUSHBUTTON,
+                                              ID_BTN_SEARCH_PREVIOUS);
+        searchPositionLabel_ = createControl(L"STATIC", L"0/0", SS_LEFT,
+                                             ID_SEARCH_POSITION);
+        nextSearchButton_ = createControl(L"BUTTON", L"Next", WS_TABSTOP | BS_PUSHBUTTON,
+                                          ID_BTN_SEARCH_NEXT);
 
         tree_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | TVS_HASBUTTONS | TVS_HASLINES |
@@ -2227,7 +2907,8 @@ private:
                                   0, 0, 0, 0, hwnd_, controlId(ID_STATUS), instance_, nullptr);
 
         for (const HWND control : {openPrimaryButton_, openCompareButton_, loadMapButton_, searchEdit_,
-                                   searchButton_, clearSearchButton_, tree_, copyLocatorButton_, exportButton_,
+                                   searchButton_, clearSearchButton_, previousSearchButton_,
+                                   searchPositionLabel_, nextSearchButton_, tree_, copyLocatorButton_, exportButton_,
                                    addHashButton_, editValueButton_, tabs_, detailsEdit_, status_}) {
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(uiFont_), TRUE);
         }
@@ -2317,10 +2998,14 @@ private:
         }
         if (findLabel) MoveWindow(findLabel, x, 11, 36, 22, TRUE);
         x += 38;
-        const int remaining = std::max(180, clientWidth - x - 190);
+        const int navigationWidth = 244;
+        const int remaining = std::max(150, clientWidth - x - 72 - 62 - navigationWidth - 18);
         MoveWindow(searchEdit_, x, buttonY, remaining, 28, TRUE); x += remaining + 4;
-        MoveWindow(searchButton_, x, buttonY, 72, 28, TRUE); x += 76;
-        MoveWindow(clearSearchButton_, x, buttonY, 106, 28, TRUE);
+        MoveWindow(searchButton_, x, buttonY, 68, 28, TRUE); x += 72;
+        MoveWindow(clearSearchButton_, x, buttonY, 58, 28, TRUE); x += 62;
+        MoveWindow(previousSearchButton_, x, buttonY, 76, 28, TRUE); x += 80;
+        MoveWindow(searchPositionLabel_, x, buttonY + 4, 64, 22, TRUE); x += 68;
+        MoveWindow(nextSearchButton_, x, buttonY, 68, 28, TRUE);
 
         const int contentY = kToolbarHeight;
         const int contentHeight = std::max(0, contentBottom - contentY);
@@ -2404,6 +3089,10 @@ private:
             runSearch(); break;
         case ID_BTN_CLEAR_SEARCH:
             clearSearch(); break;
+        case ID_BTN_SEARCH_PREVIOUS:
+            navigateSearchResult(-1); break;
+        case ID_BTN_SEARCH_NEXT:
+            navigateSearchResult(1); break;
         case ID_VIEW_EXPAND:
             if (const auto selected = TreeView_GetSelection(tree_)) TreeView_Expand(tree_, selected, TVE_EXPAND);
             break;
@@ -2457,6 +3146,8 @@ private:
                 handleTreeClick();
             } else if (notification->code == NM_DBLCLK) {
                 handleTreeDoubleClick();
+            } else if (notification->code == NM_RCLICK) {
+                handleTreeRightClick();
             }
         } else if (notification->hwndFrom == tabs_ && notification->code == TCN_SELCHANGE) {
             updateTabVisibility();
@@ -2812,6 +3503,25 @@ private:
         if (logicalModContext_ && logicalModContext_->save == save) closeLogicalModWindow();
     }
 
+    void closeBulkModWindow() {
+        if (bulkModContext_) bulkModContext_->suppressCloseNotification = true;
+        if (bulkModWindow_ && IsWindow(bulkModWindow_)) DestroyWindow(bulkModWindow_);
+        bulkModWindow_ = nullptr;
+        bulkModContext_.reset();
+    }
+
+    void closeBulkModWindowForSave(const gdtv::SaveData* save) {
+        if (bulkModContext_ && bulkModContext_->save == save) closeBulkModWindow();
+    }
+
+    void closeSectionSearchWindow() {
+        if (sectionSearchWindow_ && IsWindow(sectionSearchWindow_)) {
+            DestroyWindow(sectionSearchWindow_);
+        }
+        sectionSearchWindow_ = nullptr;
+        sectionSearchContext_.reset();
+    }
+
     bool openSave(const std::filesystem::path& path, Role role, bool confirmDiscard = true) {
         if (confirmDiscard && !confirmDiscardRole(role)) return false;
         setBusy(true, L"Parsing " + path.filename().wstring() + L"...");
@@ -2823,6 +3533,8 @@ private:
             closeSummonModWindowForSave(role == Role::Primary ? primary_.get() : compare_.get());
             closeMasteryModWindowForSave(role == Role::Primary ? primary_.get() : compare_.get());
             closeLogicalModWindowForSave(role == Role::Primary ? primary_.get() : compare_.get());
+            closeBulkModWindowForSave(role == Role::Primary ? primary_.get() : compare_.get());
+            closeSectionSearchWindow();
             if (role == Role::Primary) primary_ = std::move(parsed);
             else compare_ = std::move(parsed);
             rebuildTree();
@@ -2895,9 +3607,11 @@ private:
         if (primary_) insertSaveRoot(*primary_, Role::Primary);
         if (compare_) insertSaveRoot(*compare_, Role::Compare);
         if (logicalOnlyView_) {
+            if (!searchResults_.empty()) insertSearchRoot();
             if (!primary_ && !compare_) {
                 addItem(TVI_ROOT, L"Open a GameData save to begin", NodeData{NodeKind::Message});
             }
+            updateSearchNavigation();
             return;
         }
         if (primary_ && compare_) {
@@ -2920,6 +3634,7 @@ private:
         if (!primary_ && !compare_ && hashDatabase_.uniqueHashCount() == 0U) {
             addItem(TVI_ROOT, L"Open a GameData save to begin", NodeData{NodeKind::Message});
         }
+        updateSearchNavigation();
     }
 
     void insertSaveRoot(gdtv::SaveData& save, Role role) {
@@ -3265,9 +3980,16 @@ private:
                                    std::uint32_t unitId) const {
         auto label = utf8ToWide(std::string(field.locator)) + L" - " +
                      utf8ToWide(std::string(field.label));
-        if (field.key == 0x070AU) {
-            if (const auto* currency = gdtv::specialCurrencyForItemEntry(save, unitId)) {
-                label += L" - See Quick Values section: " + specialCurrencyNameW(*currency);
+        if (field.key == 0x070AU || field.key == 0x070BU ||
+            field.key == 0x070CU || field.key == 0x070FU) {
+            const auto itemHash = static_cast<std::uint32_t>(
+                save.elementBits(gdtv::itemsFamily().anchorKey, unitId, 0U));
+            if (const auto* currency = gdtv::specialCurrencyForItemHash(itemHash)) {
+                label += L" - Controlled by Global Values: " + specialCurrencyNameW(*currency);
+            } else if (gdtv::isCurioItemHash(itemHash)) {
+                const auto tier = gdtv::curioTierNumberForHash(itemHash);
+                label += L" - Controlled by Curios";
+                if (tier != 0U) label += L" (T" + numberW(tier) + L")";
             }
         }
         return label;
@@ -3580,9 +4302,10 @@ private:
         const auto* anchor = data.save->findGroup(family->anchorKey);
         if (!anchor) return;
 
-        // FFD2070000 is one record per logical Curio slot, not one record per
-        // reward entry. Show it once at the slot level while also exposing it
-        // in the reward-entry MOD window through the CurioSlot field scope.
+        // FFD2070000 and FFD3070000 are one record per logical Curio slot,
+        // not one record per reward entry. Show them once at the slot level
+        // while also exposing them in the reward-entry MOD window through the
+        // CurioSlot field scope.
         for (std::size_t fieldIndex = 0U; fieldIndex < family->fieldCount; ++fieldIndex) {
             const auto& field = family->fields[fieldIndex];
             if (field.unitScope != gdtv::LogicalFieldUnitScope::CurioSlot) continue;
@@ -3600,8 +4323,10 @@ private:
             fieldData.logicalFieldIndex = static_cast<std::uint32_t>(fieldIndex);
             fieldData.logicalFamilyAnchor = family->anchorKey;
             auto fieldLabel = logicalFieldLabel(*data.save, field, data.logicalNamespace);
-            const auto tier = gdtv::curioSlotTierNumber(*data.save, data.logicalNamespace);
-            if (tier != 0U) fieldLabel += L" - T" + numberW(tier);
+            if (field.key == 0x07D2U) {
+                const auto tier = gdtv::curioSlotTierNumber(*data.save, data.logicalNamespace);
+                if (tier != 0U) fieldLabel += L" - T" + numberW(tier);
+            }
             addItem(item, fieldLabel, fieldData);
         }
 
@@ -4174,36 +4899,151 @@ private:
         }
     }
 
-    void insertSearchRoot() {
-        const auto root = addItem(TVI_ROOT, L"Search Results (" + numberW(searchResults_.size()) + L")",
-                                  NodeData{NodeKind::SearchRoot}, true, true, TVI_FIRST);
-        const auto limit = std::min<std::size_t>(searchResults_.size(), 2000);
-        for (std::size_t i = 0; i < limit; ++i) {
-            const auto [role, key] = searchResults_[i];
-            auto* save = role == Role::Primary ? primary_.get() : compare_.get();
-            const auto* group = save ? save->findGroup(key) : nullptr;
-            if (!group) continue;
-            auto name = sectionDisplayName(key);
-            if (name.empty()) name = L"(not named)";
-            addItem(root,
-                (role == Role::Primary ? L"Primary \u2014 " : L"Comparison \u2014 ") + name + L" \u2014 V" +
-                std::to_wstring(group->vectorNumber) + L":" + utf8ToWide(group->keyHex()) + L" \u2014 " +
-                numberW(group->records.size()) + L" records",
-                NodeData{NodeKind::SearchKey, role, save, group->vectorNumber, key});
+    std::wstring hashSearchRow(std::uint32_t hash, const gdtv::HashEntry* entry) const {
+        auto row = utf8ToWide(gdtv::hashHex(hash)) + L"\t" +
+                   utf8ToWide(gdtv::hashRawLittleEndian(hash)) + L"\t";
+        if (entry) {
+            row += utf8ToWide(entry->category.empty() ? std::string("NA") : entry->category) + L"\t";
+            row += utf8ToWide(entry->displayName.empty() ? std::string("NA") : entry->displayName) + L"\t";
+            row += utf8ToWide(entry->id.empty() ? std::string("NA") : entry->id);
+        } else {
+            row += L"NA\tNA\tNA";
         }
+        return row;
     }
 
-    void runSearch() {
-        const auto queryWide = getWindowTextString(searchEdit_);
+    std::uint32_t searchScopeAnchor(const NodeData& data) const noexcept {
+        if (data.kind == NodeKind::MasteryRoot || data.kind == NodeKind::MasteryCharacter) {
+            return gdtv::masteryTreeFamily().anchorKey;
+        }
+        if (data.kind == NodeKind::LogicalFamily || data.kind == NodeKind::LogicalCharacter ||
+            data.kind == NodeKind::CurioEntriesRoot || data.kind == NodeKind::CurioSlot) {
+            return data.logicalFamilyAnchor != 0U ? data.logicalFamilyAnchor : data.key;
+        }
+        return 0U;
+    }
+
+    bool unitAllowedBySearchScope(const NodeData* scope,
+                                  const gdtv::LogicalFamilyDefinition& family,
+                                  std::uint32_t unitId) const noexcept {
+        if (!scope) return true;
+        if (searchScopeAnchor(*scope) != family.anchorKey) return false;
+        const auto address = gdtv::decodeLogicalUnitId(family, unitId);
+        if (scope->kind == NodeKind::LogicalCharacter) {
+            return address.valid && address.characterScoped &&
+                   address.characterGroup == scope->characterGroup;
+        }
+        if (scope->kind == NodeKind::MasteryCharacter) {
+            if (!address.valid || address.shared != scope->sharedGroup) return false;
+            return scope->sharedGroup || address.characterGroup == scope->characterGroup;
+        }
+        if (scope->kind == NodeKind::CurioSlot) {
+            return address.valid && address.slot == scope->logicalNamespace;
+        }
+        return true;
+    }
+
+    std::vector<SearchMatch> collectSearchMatches(const std::wstring& queryWide,
+                                                   const NodeData* scope = nullptr) const {
         const auto query = gdtv::toLowerAscii(wideToUtf8(queryWide));
-        if (query.empty()) return;
-        searchResults_.clear();
-        const auto numericKey = gdtv::parseKeyQuery(query);
-        auto scan = [&](Role role, gdtv::SaveData* save) {
+        std::vector<SearchMatch> results;
+        if (query.empty()) return results;
+
+        auto containsQuery = [&](std::string text) {
+            return gdtv::toLowerAscii(std::move(text)).find(query) != std::string::npos;
+        };
+        auto scanLogicalSave = [&](Role role, gdtv::SaveData* save) {
             if (!save) return;
-            for (const auto& [key, group] : save->groupsByKey()) {
-                bool match = numericKey && *numericKey == key;
-                if (!match) {
+            if (scope && scope->save != save) return;
+            std::vector<const gdtv::LogicalFamilyDefinition*> families;
+            families.reserve(gdtv::sharedLogicalFamilies().size() + 1U);
+            for (const auto* family : gdtv::sharedLogicalFamilies()) {
+                if (family) families.push_back(family);
+            }
+            families.push_back(&gdtv::masteryTreeFamily());
+
+            for (const auto* family : families) {
+                if (!family || !gdtv::familyAvailable(*save, *family)) continue;
+                if (scope && searchScopeAnchor(*scope) != family->anchorKey) continue;
+                const auto* anchor = save->findGroup(family->anchorKey);
+                if (!anchor) continue;
+                for (const auto& record : anchor->records) {
+                    const auto unitId = record.index;
+                    if (!unitAllowedBySearchScope(scope, *family, unitId)) continue;
+
+                    std::string base = std::string(family->name) + " " +
+                                       std::string(family->slotLabel) + " " +
+                                       std::to_string(unitId) + " " +
+                                       wideToUtf8(logicalUnitSummaryW(*family, unitId));
+                    bool matched = containsQuery(base);
+                    std::wstring matchedRow;
+                    std::wstring preferredRow;
+
+                    for (std::size_t fieldIndex = 0U; fieldIndex < family->fieldCount; ++fieldIndex) {
+                        const auto& field = family->fields[fieldIndex];
+                        if (!gdtv::logicalFieldAvailable(*save, field, unitId)) continue;
+                        const auto recordUnitId = gdtv::logicalFieldRecordUnitId(field, unitId);
+                        const auto bits = save->elementBits(field.key, recordUnitId, field.elementIndex);
+                        std::string fieldText = std::string(field.locator) + " " +
+                                                std::string(field.label) + " " +
+                                                std::to_string(bits);
+                        if (containsQuery(fieldText) && !matched) {
+                            matched = true;
+                            matchedRow = utf8ToWide(std::string(field.label)) + L" = " +
+                                         numberW(bits);
+                        }
+                        if (field.kind != gdtv::LogicalValueKind::Hash) continue;
+
+                        const auto hash = static_cast<std::uint32_t>(bits);
+                        const auto* entries = hashDatabase_.find(hash);
+                        if (!entries || entries->empty()) {
+                            const auto row = hashSearchRow(hash, nullptr);
+                            if (preferredRow.empty()) preferredRow = row;
+                            if (containsQuery(wideToUtf8(row))) {
+                                matched = true;
+                                matchedRow = row;
+                            }
+                            continue;
+                        }
+                        for (const auto& entry : *entries) {
+                            const auto row = hashSearchRow(hash, &entry);
+                            if (preferredRow.empty()) preferredRow = row;
+                            if (containsQuery(wideToUtf8(row))) {
+                                matched = true;
+                                matchedRow = row;
+                                break;
+                            }
+                        }
+                    }
+                    if (!matched) continue;
+                    if (matchedRow.empty()) matchedRow = preferredRow;
+
+                    SearchMatch result;
+                    result.kind = SearchMatch::Kind::LogicalUnit;
+                    result.role = role;
+                    result.save = save;
+                    result.familyAnchor = family->anchorKey;
+                    result.unitId = unitId;
+                    const std::wstring roleLabel = role == Role::Primary ? L"Primary" : L"Comparison";
+                    result.label = roleLabel + L" — " + utf8ToWide(std::string(family->name)) +
+                                   L" — " + logicalUnitSummaryW(*family, unitId);
+                    result.matchedRow = matchedRow;
+                    results.push_back(std::move(result));
+                }
+            }
+        };
+
+        if (scope) {
+            scanLogicalSave(scope->role, scope->save);
+        } else {
+            scanLogicalSave(Role::Primary, primary_.get());
+            scanLogicalSave(Role::Compare, compare_.get());
+
+            const auto numericKey = gdtv::parseKeyQuery(query);
+            auto scanRawSections = [&](Role role, gdtv::SaveData* save) {
+                if (!save) return;
+                for (const auto& [key, group] : save->groupsByKey()) {
+                    bool match = numericKey && *numericKey == key;
                     std::string haystack = group.keyHex() + " " + group.stableLocator();
                     if (const auto* section = sectionMap_.find(key)) {
                         haystack += " " + section->locator + " " + section->stableLocator + " " +
@@ -4213,30 +5053,142 @@ private:
                         haystack += " " + named->locator + " " + named->name + " " + named->subsystem +
                                     " " + named->confidence + " " + named->officialSaveIdType +
                                     " " + named->storageType + " " + named->hashCategory +
-                                    " " + named->internalPrefix + " " + named->note +
-                                    " " + named->recommendedTest +
-                                    " subsystem:" + named->subsystem +
-                                    " confidence:" + named->confidence +
-                                    " storage:" + named->storageType +
-                                    " enum:" + named->officialSaveIdType +
-                                    " hashcategory:" + named->hashCategory +
-                                    " prefix:" + named->internalPrefix;
+                                    " " + named->internalPrefix + " " + named->note;
                     }
-                    match = gdtv::toLowerAscii(std::move(haystack)).find(query) != std::string::npos;
+                    if (!match) match = containsQuery(std::move(haystack));
+                    if (!match) continue;
+                    SearchMatch result;
+                    result.kind = SearchMatch::Kind::RawSection;
+                    result.role = role;
+                    result.save = save;
+                    result.key = key;
+                    result.label = (role == Role::Primary ? L"Primary" : L"Comparison") +
+                                   std::wstring(L" — Raw Section — ") + sectionDisplayName(key) +
+                                   L" — " + utf8ToWide(group.keyHex());
+                    results.push_back(std::move(result));
                 }
-                if (match) searchResults_.emplace_back(role, key);
+            };
+            scanRawSections(Role::Primary, primary_.get());
+            scanRawSections(Role::Compare, compare_.get());
+        }
+        return results;
+    }
+
+    void insertSearchRoot() {
+        const auto root = addItem(TVI_ROOT, L"Search Results (" + numberW(searchResults_.size()) + L")",
+                                  NodeData{NodeKind::SearchRoot}, true, true, TVI_FIRST);
+        const auto limit = searchResults_.size();
+        for (std::size_t index = 0; index < limit; ++index) {
+            const auto& result = searchResults_[index];
+            if (result.kind == SearchMatch::Kind::RawSection) {
+                const auto* group = result.save ? result.save->findGroup(result.key) : nullptr;
+                if (!group) continue;
+                NodeData data{NodeKind::SearchKey, result.role, result.save,
+                              group->vectorNumber, result.key};
+                addItem(root, result.label, data);
+                continue;
             }
-        };
-        scan(Role::Primary, primary_.get());
-        scan(Role::Compare, compare_.get());
+            const auto* family = gdtv::logicalFamilyForAnchor(result.familyAnchor);
+            if (!family || !result.save) continue;
+            NodeData data{result.familyAnchor == gdtv::masteryTreeFamily().anchorKey
+                              ? NodeKind::MasteryEntry : NodeKind::LogicalSlot,
+                          result.role, result.save};
+            data.key = result.familyAnchor;
+            data.logicalFamilyAnchor = result.familyAnchor;
+            data.unitId = result.unitId;
+            const auto address = gdtv::decodeLogicalUnitId(*family, result.unitId);
+            if (address.valid) {
+                data.characterGroup = address.characterGroup;
+                data.logicalNamespace = address.nameSpace;
+                data.sharedGroup = address.shared;
+            }
+            std::size_t ordinal = 0U;
+            if (result.save->findRecord(result.familyAnchor, result.unitId, &ordinal)) {
+                data.recordOrdinal = ordinal;
+            }
+            auto label = result.label;
+            if (!result.matchedRow.empty()) label += L" — " + result.matchedRow;
+            const auto item = addItem(root, label, data, true);
+            addDummy(item);
+        }
+    }
+
+    void updateSearchNavigation() {
+        if (!searchPositionLabel_) return;
+        if (searchResults_.empty()) {
+            currentSearchResult_ = 0U;
+            SetWindowTextW(searchPositionLabel_, L"0/0");
+            EnableWindow(previousSearchButton_, FALSE);
+            EnableWindow(nextSearchButton_, FALSE);
+            return;
+        }
+        if (currentSearchResult_ >= searchResults_.size()) currentSearchResult_ = 0U;
+        const auto text = numberW(currentSearchResult_ + 1U) + L"/" + numberW(searchResults_.size());
+        SetWindowTextW(searchPositionLabel_, text.c_str());
+        EnableWindow(previousSearchButton_, TRUE);
+        EnableWindow(nextSearchButton_, TRUE);
+    }
+
+    void selectSearchResult(std::size_t index) {
+        if (searchResults_.empty()) {
+            updateSearchNavigation();
+            return;
+        }
+        currentSearchResult_ = std::min(index, searchResults_.size() - 1U);
+        updateSearchNavigation();
+        for (HTREEITEM root = TreeView_GetRoot(tree_); root;
+             root = TreeView_GetNextSibling(tree_, root)) {
+            const auto* rootData = nodeData(root);
+            if (!rootData || rootData->kind != NodeKind::SearchRoot) continue;
+            TreeView_Expand(tree_, root, TVE_EXPAND);
+            auto child = TreeView_GetChild(tree_, root);
+            for (std::size_t i = 0U; child && i < currentSearchResult_; ++i) {
+                child = TreeView_GetNextSibling(tree_, child);
+            }
+            if (child) {
+                TreeView_SelectItem(tree_, child);
+                TreeView_EnsureVisible(tree_, child);
+                SetFocus(tree_);
+                showSelectedNode();
+            }
+            return;
+        }
+    }
+
+    void navigateSearchResult(int direction) {
+        if (searchResults_.empty()) return;
+        if (direction < 0) {
+            currentSearchResult_ = currentSearchResult_ == 0U
+                ? searchResults_.size() - 1U : currentSearchResult_ - 1U;
+        } else {
+            currentSearchResult_ = (currentSearchResult_ + 1U) % searchResults_.size();
+        }
+        selectSearchResult(currentSearchResult_);
+    }
+
+    void activateSearchResults(const std::vector<SearchMatch>& results, std::size_t index) {
+        searchResults_ = results;
+        currentSearchResult_ = results.empty() ? 0U : std::min(index, results.size() - 1U);
         rebuildTree();
-        setStatus(L"Search found " + numberW(searchResults_.size()) + L" matching key entries");
+        selectSearchResult(currentSearchResult_);
+    }
+
+    void runSearch() {
+        searchResults_ = collectSearchMatches(getWindowTextString(searchEdit_));
+        currentSearchResult_ = 0U;
+        rebuildTree();
+        updateSearchNavigation();
+        if (!searchResults_.empty()) selectSearchResult(0U);
+        setStatus(L"Global search found " + numberW(searchResults_.size()) +
+                  L" matching entries / sections");
     }
 
     void clearSearch() {
         searchResults_.clear();
+        currentSearchResult_ = 0U;
         SetWindowTextW(searchEdit_, L"");
         rebuildTree();
+        updateSearchNavigation();
     }
 
 
@@ -4443,16 +5395,42 @@ private:
 
     void editSelectedValue() {
         if (const auto* data = nodeData(TreeView_GetSelection(tree_)); data) {
-            if (data->kind == NodeKind::LogicalField && data->save &&
-                data->logicalFamilyAnchor == gdtv::itemsFamily().anchorKey &&
-                data->key == 0x070AU) {
-                if (const auto* currency =
-                        gdtv::specialCurrencyForItemEntry(*data->save, data->unitId)) {
-                    const auto message = specialCurrencyNameW(*currency) +
-                        L" uses a dedicated balance section. Edit it under Quick Values instead.";
-                    MessageBoxW(hwnd_, message.c_str(), L"See Quick Values",
-                                MB_OK | MB_ICONINFORMATION);
-                    return;
+            if (data->save) {
+                std::optional<std::uint32_t> protectedItemUnitId;
+                if (data->kind == NodeKind::LogicalField &&
+                    data->logicalFamilyAnchor == gdtv::itemsFamily().anchorKey &&
+                    data->logicalFieldIndex > 0U) {
+                    protectedItemUnitId = data->unitId;
+                } else if ((data->kind == NodeKind::Record ||
+                            data->kind == NodeKind::HashOccurrence) &&
+                           (data->key == 0x070AU || data->key == 0x070BU ||
+                            data->key == 0x070CU || data->key == 0x070FU)) {
+                    const auto* group = data->save->findGroup(data->key);
+                    if (group && data->recordOrdinal < group->records.size()) {
+                        protectedItemUnitId = group->records[data->recordOrdinal].index;
+                    }
+                }
+                if (protectedItemUnitId) {
+                    const auto itemHash = static_cast<std::uint32_t>(
+                        data->save->elementBits(gdtv::itemsFamily().anchorKey,
+                                                *protectedItemUnitId, 0U));
+                    if (const auto* currency = gdtv::specialCurrencyForItemHash(itemHash)) {
+                        const auto message = specialCurrencyNameW(*currency) +
+                            L" uses a dedicated balance. The Item Count, Flags, and Unknown fields "
+                            L"are disabled here and must be edited under Global Values.";
+                        MessageBoxW(hwnd_, message.c_str(), L"Go to Global Values",
+                                    MB_OK | MB_ICONINFORMATION);
+                        focusLogicalFamily(data->save, gdtv::quickValuesFamily().anchorKey);
+                        return;
+                    }
+                    if (gdtv::isCurioItemHash(itemHash)) {
+                        MessageBoxW(hwnd_,
+                            L"This is a Curio T1-T4 Item ID. The Item Count, Flags, and Unknown fields "
+                            L"are disabled here and must be edited under Curios.",
+                            L"Go to Curios", MB_OK | MB_ICONINFORMATION);
+                        focusLogicalFamily(data->save, gdtv::curiosFamily().anchorKey);
+                        return;
+                    }
                 }
             }
             if (data->kind == NodeKind::LogicalSlot) {
@@ -4600,6 +5578,283 @@ private:
         }
     }
 
+    static bool emptyLogicalIdentifier(std::uint32_t value) noexcept {
+        return value == 0U || value == 0xFFFFFFFFU || gdtv::isGlobalEmptySlotHash(value);
+    }
+
+    bool protectedBulkItemHash(std::uint32_t hash) const {
+        if (gdtv::isProtectedBulkItemHash(hash)) return true;
+        const auto* entries = hashDatabase_.find(hash);
+        if (!entries) return false;
+        for (const auto& entry : *entries) {
+            const auto display = lowerWide(utf8ToWide(entry.displayName));
+            const auto id = lowerWide(utf8ToWide(entry.id));
+            if (display == L"rupies" || display == L"mastery point" ||
+                display == L"mastery points" || display == L"mastery points (msp)" ||
+                display == L"curio" ||
+                display == L"conflux points" || display == L"conflux points (cp)" ||
+                display == L"resonance points" || display == L"resonance points (rp)" ||
+                id == L"item_19_0001" || id == L"item_19_0002" ||
+                id == L"item_19_0003" || id == L"item_19_0004") {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool logicalUnitIsNonEmpty(const gdtv::SaveData& save,
+                               const gdtv::LogicalFamilyDefinition& family,
+                               std::uint32_t unitId) const {
+        if (family.fieldCount == 0U ||
+            !gdtv::logicalFieldAvailable(save, family.fields[0], unitId)) {
+            return false;
+        }
+        const auto& anchorField = family.fields[0];
+        const auto anchorUnitId = gdtv::logicalFieldRecordUnitId(anchorField, unitId);
+        const auto anchorValue = static_cast<std::uint32_t>(
+            save.elementBits(anchorField.key, anchorUnitId, anchorField.elementIndex));
+        if (family.anchorKey == gdtv::summonInventoryFamily().anchorKey) {
+            const auto& stateField = family.fields[family.fieldCount - 1U];
+            if (gdtv::logicalFieldAvailable(save, stateField, unitId)) {
+                const auto stateValue = static_cast<std::uint32_t>(
+                    save.elementBits(stateField.key, unitId, stateField.elementIndex));
+                if (stateValue != 0U) return true;
+            }
+        }
+        if (anchorField.kind == gdtv::LogicalValueKind::Hash) {
+            return !emptyLogicalIdentifier(anchorValue);
+        }
+        return anchorValue != 0U;
+    }
+
+    const gdtv::LogicalFamilyDefinition* bulkFamilyForNode(const NodeData& data) const {
+        if (data.kind == NodeKind::MasteryCharacter) return &gdtv::masteryTreeFamily();
+        if (data.kind != NodeKind::LogicalFamily && data.kind != NodeKind::LogicalCharacter) {
+            return nullptr;
+        }
+        const auto anchor = data.logicalFamilyAnchor != 0U ? data.logicalFamilyAnchor : data.key;
+        const auto* family = gdtv::logicalFamilyForAnchor(anchor);
+        if (!family) return nullptr;
+        if (data.kind == NodeKind::LogicalFamily) {
+            if (family->anchorKey == gdtv::summonInventoryFamily().anchorKey ||
+                family->anchorKey == gdtv::itemsFamily().anchorKey ||
+                family->anchorKey == gdtv::weaponsFamily().anchorKey ||
+                family->anchorKey == gdtv::currentSigilsFamily().anchorKey) {
+                return family;
+            }
+            return nullptr;
+        }
+        if (family->anchorKey == gdtv::currentTraitsFamily().anchorKey ||
+            family->anchorKey == gdtv::overMasteryFamily().anchorKey) {
+            return family;
+        }
+        return nullptr;
+    }
+
+    std::vector<std::uint32_t> bulkUnitIdsForNode(
+        const NodeData& data, const gdtv::LogicalFamilyDefinition& family) const {
+        std::vector<std::uint32_t> result;
+        if (!data.save) return result;
+        const auto* anchor = data.save->findGroup(family.anchorKey);
+        if (!anchor) return result;
+        result.reserve(anchor->records.size());
+        for (const auto& record : anchor->records) {
+            const auto unitId = record.index;
+            const auto address = gdtv::decodeLogicalUnitId(family, unitId);
+            if (data.kind == NodeKind::LogicalCharacter) {
+                if (!address.valid || !address.characterScoped ||
+                    address.characterGroup != data.characterGroup) {
+                    continue;
+                }
+            } else if (data.kind == NodeKind::MasteryCharacter) {
+                if (!address.valid || address.shared != data.sharedGroup) continue;
+                if (!data.sharedGroup && address.characterGroup != data.characterGroup) continue;
+            }
+            if (!logicalUnitIsNonEmpty(*data.save, family, unitId)) continue;
+            if (family.anchorKey == gdtv::itemsFamily().anchorKey) {
+                const auto itemHash = static_cast<std::uint32_t>(
+                    data.save->elementBits(0x0709U, unitId, 0U));
+                if (protectedBulkItemHash(itemHash)) continue;
+            }
+            result.push_back(unitId);
+        }
+        std::sort(result.begin(), result.end());
+        result.erase(std::unique(result.begin(), result.end()), result.end());
+        return result;
+    }
+
+    std::wstring bulkScopeLabel(const NodeData& data,
+                                const gdtv::LogicalFamilyDefinition& family) const {
+        if (data.kind == NodeKind::MasteryCharacter) {
+            return data.sharedGroup ? L"Shared / Global" : characterSectionLabel(data.characterGroup);
+        }
+        if (data.kind == NodeKind::LogicalCharacter) {
+            return characterSectionLabel(data.characterGroup);
+        }
+        if (family.anchorKey == gdtv::itemsFamily().anchorKey) {
+            return L"All Non-Empty Slots (protected currency and Curio IDs excluded)";
+        }
+        return L"All Non-Empty Slots";
+    }
+
+    void openBulkModWindow(const NodeData& data) {
+        if (!data.save) return;
+        const auto* family = bulkFamilyForNode(data);
+        if (!family) return;
+        auto unitIds = bulkUnitIdsForNode(data, *family);
+        if (unitIds.empty()) {
+            MessageBoxW(hwnd_, L"No eligible non-empty slots were found for this group.",
+                        L"Bulk MOD", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+
+        closeBulkModWindow();
+        bulkModContext_ = std::make_unique<BulkLogicalModDialogContext>();
+        bulkModContext_->save = data.save;
+        bulkModContext_->hashDatabase = &hashDatabase_;
+        bulkModContext_->family = family;
+        bulkModContext_->unitIds = std::move(unitIds);
+        bulkModContext_->scopeLabel = bulkScopeLabel(data, *family);
+        bulkModWindow_ = createBulkLogicalModWindow(hwnd_, *bulkModContext_);
+        if (!bulkModWindow_) {
+            bulkModContext_.reset();
+            showError(hwnd_, L"Could not open the bulk MOD window.");
+            return;
+        }
+        setStatus(utf8ToWide(std::string(family->name)) + L" bulk MOD opened for " +
+                  numberW(bulkModContext_->unitIds.size()) + L" non-empty slot(s)");
+    }
+
+    void maxAllItemCounts(const NodeData& data) {
+        if (!data.save || data.kind != NodeKind::LogicalFamily ||
+            data.logicalFamilyAnchor != gdtv::itemsFamily().anchorKey) {
+            return;
+        }
+        const auto unitIds = bulkUnitIdsForNode(data, gdtv::itemsFamily());
+        if (unitIds.empty()) {
+            MessageBoxW(hwnd_, L"No eligible non-empty Item slots were found.",
+                        L"MAX All Items", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        const auto warning = L"Set Item Count to 9999 in " + numberW(unitIds.size()) +
+            L" current non-empty Item slots?\r\n\r\nCurio, Rupies, Mastery Points (MSP), Conflux Points (CP), and Resonance Points (RP) entries are excluded.";
+        if (MessageBoxW(hwnd_, warning.c_str(), L"MAX All Items",
+                        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+            return;
+        }
+        try {
+            std::uint64_t changed = 0U;
+            const auto& countField = gdtv::itemsFamily().fields[1];
+            for (const auto unitId : unitIds) {
+                if (!gdtv::logicalFieldAvailable(*data.save, countField, unitId)) continue;
+                data.save->setElementBits(countField.key, unitId,
+                                          countField.elementIndex, 9999U);
+                ++changed;
+            }
+            rebuildTree();
+            setStatus(numberW(changed) +
+                      L" Item Count value(s) set to 9999 in memory - use File > Save Edited ... As");
+        } catch (const std::exception& exception) {
+            showError(hwnd_, L"Could not MAX all Item counts:\n\n" +
+                             utf8ToWide(exception.what()));
+        }
+    }
+
+    bool canSearchLogicalNode(const NodeData& data) const noexcept {
+        return data.save && (data.kind == NodeKind::LogicalFamily ||
+                             data.kind == NodeKind::LogicalCharacter ||
+                             data.kind == NodeKind::CurioEntriesRoot ||
+                             data.kind == NodeKind::CurioSlot ||
+                             data.kind == NodeKind::MasteryRoot ||
+                             data.kind == NodeKind::MasteryCharacter);
+    }
+
+    std::wstring sectionSearchTitle(const NodeData& data) const {
+        const auto anchor = searchScopeAnchor(data);
+        const auto* family = gdtv::logicalFamilyForAnchor(anchor);
+        auto title = family ? utf8ToWide(std::string(family->name)) : L"Section";
+        if (data.kind == NodeKind::LogicalCharacter) {
+            title += L" - " + characterSectionLabel(data.characterGroup);
+        } else if (data.kind == NodeKind::MasteryCharacter) {
+            title += data.sharedGroup ? L" - Shared / Global"
+                                      : L" - " + characterSectionLabel(data.characterGroup);
+        } else if (data.kind == NodeKind::CurioSlot) {
+            title += L" - Slot " + numberW(data.logicalNamespace + 1U);
+        }
+        return title + L" Search";
+    }
+
+    void openSectionSearchWindow(const NodeData& data) {
+        if (!canSearchLogicalNode(data)) return;
+        closeSectionSearchWindow();
+        const NodeData scope = data;
+        sectionSearchContext_ = std::make_unique<SectionSearchDialogContext>();
+        sectionSearchContext_->title = sectionSearchTitle(data);
+        sectionSearchContext_->search = [this, scope](const std::wstring& query) {
+            return collectSearchMatches(query, &scope);
+        };
+        sectionSearchContext_->activate = [this](const std::vector<SearchMatch>& results,
+                                                  std::size_t index) {
+            activateSearchResults(results, index);
+        };
+        sectionSearchWindow_ = createSectionSearchWindow(hwnd_, *sectionSearchContext_);
+        if (!sectionSearchWindow_) {
+            sectionSearchContext_.reset();
+            showError(hwnd_, L"Could not open the section search window.");
+            return;
+        }
+        setStatus(sectionSearchContext_->title + L" opened");
+    }
+
+    void handleTreeRightClick() {
+        const DWORD position = GetMessagePos();
+        POINT screenPoint{static_cast<SHORT>(LOWORD(position)),
+                          static_cast<SHORT>(HIWORD(position))};
+        POINT treePoint = screenPoint;
+        ScreenToClient(tree_, &treePoint);
+        TVHITTESTINFO hit{};
+        hit.pt = treePoint;
+        const auto item = TreeView_HitTest(tree_, &hit);
+        if (!item || !(hit.flags & (TVHT_ONITEMICON | TVHT_ONITEMLABEL |
+                                    TVHT_ONITEMSTATEICON))) {
+            return;
+        }
+        const auto* data = nodeData(item);
+        if (!data) return;
+        const auto* family = bulkFamilyForNode(*data);
+        const bool canMaxItems = data->kind == NodeKind::LogicalFamily &&
+                                 data->logicalFamilyAnchor == gdtv::itemsFamily().anchorKey;
+        const bool canSearch = canSearchLogicalNode(*data);
+        if (!family && !canMaxItems && !canSearch) return;
+
+        TreeView_SelectItem(tree_, item);
+        HMENU menu = CreatePopupMenu();
+        if (!menu) return;
+        constexpr UINT kBulkModCommand = 1U;
+        constexpr UINT kMaxItemsCommand = 2U;
+        constexpr UINT kSearchSectionCommand = 3U;
+        if (canSearch) {
+            AppendMenuW(menu, MF_STRING, kSearchSectionCommand,
+                        L"Search This Section...");
+        }
+        if (canSearch && (family || canMaxItems)) AppendMenuW(menu, MF_SEPARATOR, 0U, nullptr);
+        if (family) {
+            AppendMenuW(menu, MF_STRING, kBulkModCommand,
+                        L"MOD All Non-Empty Slots...");
+        }
+        if (canMaxItems) {
+            AppendMenuW(menu, MF_STRING, kMaxItemsCommand,
+                        L"MAX All Item Counts to 9999");
+        }
+        const auto command = TrackPopupMenu(
+            menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN,
+            screenPoint.x, screenPoint.y, 0, hwnd_, nullptr);
+        DestroyMenu(menu);
+        if (command == kSearchSectionCommand) openSectionSearchWindow(*data);
+        else if (command == kBulkModCommand) openBulkModWindow(*data);
+        else if (command == kMaxItemsCommand) maxAllItemCounts(*data);
+    }
+
     void handleTreeClick() {
         const DWORD position = GetMessagePos();
         POINT point{static_cast<SHORT>(LOWORD(position)), static_cast<SHORT>(HIWORD(position))};
@@ -4700,6 +5955,45 @@ private:
         setStatus(std::wstring(roleName) + L" Mastery Tree - " +
                   logicalUnitSummaryW(gdtv::masteryTreeFamily(), data.unitId) +
                   L" is open in the MOD window");
+    }
+
+    void focusLogicalFamily(gdtv::SaveData* save, std::uint32_t anchor) {
+        if (!save) return;
+        const Role role = save == compare_.get() ? Role::Compare : Role::Primary;
+        for (HTREEITEM root = TreeView_GetRoot(tree_); root;
+             root = TreeView_GetNextSibling(tree_, root)) {
+            const auto* rootData = nodeData(root);
+            if (!rootData || rootData->kind != NodeKind::SaveRoot || rootData->role != role) continue;
+            TreeView_Expand(tree_, root, TVE_EXPAND);
+            for (HTREEITEM logical = TreeView_GetChild(tree_, root); logical;
+                 logical = TreeView_GetNextSibling(tree_, logical)) {
+                const auto* logicalData = nodeData(logical);
+                if (!logicalData || logicalData->kind != NodeKind::LogicalRoot) continue;
+                TreeView_Expand(tree_, logical, TVE_EXPAND);
+                for (HTREEITEM familyItem = TreeView_GetChild(tree_, logical); familyItem;
+                     familyItem = TreeView_GetNextSibling(tree_, familyItem)) {
+                    const auto* familyData = nodeData(familyItem);
+                    if (!familyData) continue;
+                    std::uint32_t itemAnchor = 0U;
+                    if (familyData->kind == NodeKind::MasteryRoot) {
+                        itemAnchor = gdtv::masteryTreeFamily().anchorKey;
+                    } else if (familyData->kind == NodeKind::LogicalFamily ||
+                               familyData->kind == NodeKind::CurioEntriesRoot) {
+                        itemAnchor = familyData->logicalFamilyAnchor != 0U
+                            ? familyData->logicalFamilyAnchor : familyData->key;
+                    }
+                    if (itemAnchor != anchor) continue;
+                    TreeView_SelectItem(tree_, familyItem);
+                    TreeView_EnsureVisible(tree_, familyItem);
+                    SetFocus(tree_);
+                    showSelectedNode();
+                    const auto* family = gdtv::logicalFamilyForAnchor(anchor);
+                    setStatus((family ? utf8ToWide(std::string(family->name)) : L"Section") +
+                              L" selected");
+                    return;
+                }
+            }
+        }
     }
 
     void focusKey(Role role, std::uint32_t key) {
@@ -5140,11 +6434,16 @@ private:
                         << L"Current Value: "
                         << formatElementValue(*data->save, field.key, data->unitId,
                                               field.elementIndex, field.kind) << L"\r\n";
-                    if (field.key == 0x070AU) {
-                        if (const auto* currency =
-                                gdtv::specialCurrencyForItemEntry(*data->save, data->unitId)) {
-                            out << L"Editing: See Quick Values section - "
+                    if (field.key == 0x070AU || field.key == 0x070BU ||
+                        field.key == 0x070CU || field.key == 0x070FU) {
+                        const auto itemHash = static_cast<std::uint32_t>(
+                            data->save->elementBits(gdtv::itemsFamily().anchorKey,
+                                                    data->unitId, 0U));
+                        if (const auto* currency = gdtv::specialCurrencyForItemHash(itemHash)) {
+                            out << L"Editing: This field is disabled here. Use Global Values - "
                                 << specialCurrencyNameW(*currency) << L".\r\n";
+                        } else if (gdtv::isCurioItemHash(itemHash)) {
+                            out << L"Editing: This field is disabled here. Use the Curios section.\r\n";
                         }
                     }
                     if (showDetailedLogicalInfo_) {

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-project(GBFRTool VERSION 1.4.0 LANGUAGES CXX)
+project(GBFRTool VERSION 1.6.0 LANGUAGES CXX)
 
-set(GBFR_TOOL_DISPLAY_VERSION "1.04")
+set(GBFR_TOOL_DISPLAY_VERSION "1.06")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -103,8 +103,8 @@ if(WIN32)
 
     add_custom_command(TARGET GBFRTool POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/README.txt"
-            "$<TARGET_FILE_DIR:GBFRTool>/README.txt"
+            "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+            "$<TARGET_FILE_DIR:GBFRTool>/README.md"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.txt"
             "$<TARGET_FILE_DIR:GBFRTool>/LICENSE.txt"
@@ -126,7 +126,7 @@ if(GBFR_TOOL_BUILD_TESTS)
 endif()
 
 install(TARGETS GBFRToolCLI RUNTIME DESTINATION .)
-install(FILES README.txt LICENSE.txt DESTINATION .)
+install(FILES README.md LICENSE.txt DESTINATION .)
 install(DIRECTORY Licenses DESTINATION .)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Hashfolder")
     install(DIRECTORY Hashfolder DESTINATION .)
