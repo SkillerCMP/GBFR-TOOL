@@ -3,6 +3,7 @@
 #include "HashDatabase.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <set>
 #include <utility>
 
@@ -106,15 +107,16 @@ constexpr LogicalFamilyDefinition kItemsFamily{
 };
 
 
-// Weapon inventory arrays share UnitIDs 40000-40255. Only the fields whose
-// meanings are Confirmed or Strong are exposed by the simple editor; unknown
-// state/skin/flag companions remain untouched in the raw tree.
-constexpr std::array<LogicalFieldDefinition, 5> kWeaponFields{{
+// Weapon inventory arrays share UnitIDs 40000-40255. The combined Weapon MOD
+// window also exposes the confirmed/strong appearance and Wrightstone links.
+constexpr std::array<LogicalFieldDefinition, 6> kWeaponFields{{
     {0x0AF3U, 0U, "FFF30A", "Weapon ID", "Confirmed", LogicalValueKind::Hash, false,
      "Weapons", false},
     {0x0AF4U, 0U, "FFF40A", "Weapon Experience", "Confirmed", LogicalValueKind::Unsigned, false},
     {0x0AF5U, 0U, "FFF50A", "Weapon Level Cap", "Strong", LogicalValueKind::Signed, false},
     {0x0AF6U, 0U, "FFF60A", "Mirage Munition Plus Marks", "Strong", LogicalValueKind::Signed, false},
+    {0x0AFEU, 0U, "FFFE0A", "Weapon Appearance / Skin ID", "Strong", LogicalValueKind::Hash, false,
+     "Weapons", false},
     {0x0B00U, 0U, "FF000B", "Wrightstone Item ID", "Confirmed", LogicalValueKind::Hash, false},
 }};
 
@@ -123,15 +125,59 @@ constexpr LogicalFamilyDefinition kWeaponsFamily{
     kWeaponFields.data(), kWeaponFields.size(), {}, false, LogicalGroupingKind::Flat
 };
 
-// The three editor-facing fields are the confirmed/understood portion of the
-// five-array Current Sigils relationship. Instance and companion fields remain
-// preserved but are not exposed by the simple editor.
-constexpr std::array<LogicalFieldDefinition, 3> kCurrentSigilFields{{
+// Wrightstone inventory parent records use UnitIDs 50000-54999. Each occupied
+// parent owns three linked trait records in the 140 namespace:
+//   trait base = 140000000 + ((Wrightstone UnitID - 50000) * 100)
+// The save does not expose a confirmed unique per-copy weapon reference, so
+// attachment/equip status is presented as a derived composite match in the UI.
+constexpr std::array<LogicalFieldDefinition, 10> kWrightstoneFields{{
+    {0x0836U, 0U, "FF3608", "Wrightstone ID", "Confirmed", LogicalValueKind::Hash, false,
+     "Wrightstone", false},
+    {0x0837U, 0U, "FF3708", "Instance / Companion Value",
+     "Confirmed structure / unknown meaning", LogicalValueKind::Unsigned, false},
+    {0x0838U, 0U, "FF3808", "Locked Flag", "Confirmed", LogicalValueKind::Bitfield, false},
+    {0x0839U, 0U, "FF3908", "State / Type Value",
+     "Confirmed structure / unknown meaning", LogicalValueKind::Bitfield, false},
+    {0x06A5U, 0U, "FFA506", "Trait Slot 1 ID", "Confirmed", LogicalValueKind::Hash, false,
+     "Trait", false, LogicalFieldUnitScope::WrightstoneTrait1},
+    {0x06A6U, 0U, "FFA606", "Trait Slot 1 Level", "Confirmed", LogicalValueKind::Signed, false,
+     {}, false, LogicalFieldUnitScope::WrightstoneTrait1},
+    {0x06A5U, 0U, "FFA506", "Trait Slot 2 ID", "Confirmed", LogicalValueKind::Hash, false,
+     "Trait", false, LogicalFieldUnitScope::WrightstoneTrait2},
+    {0x06A6U, 0U, "FFA606", "Trait Slot 2 Level", "Confirmed", LogicalValueKind::Signed, false,
+     {}, false, LogicalFieldUnitScope::WrightstoneTrait2},
+    {0x06A5U, 0U, "FFA506", "Trait Slot 3 ID", "Confirmed", LogicalValueKind::Hash, false,
+     "Trait", false, LogicalFieldUnitScope::WrightstoneTrait3},
+    {0x06A6U, 0U, "FFA606", "Trait Slot 3 Level", "Confirmed", LogicalValueKind::Signed, false,
+     {}, false, LogicalFieldUnitScope::WrightstoneTrait3},
+}};
+
+constexpr LogicalFamilyDefinition kWrightstonesFamily{
+    "Wrightstones", "Wrightstone Slot", 0x0836U,
+    kWrightstoneFields.data(), kWrightstoneFields.size(), "Wrightstone", false,
+    LogicalGroupingKind::Flat
+};
+
+// Current Sigils and Current Traits are physically separate save sections,
+// but each sigil inventory UnitID maps to two fixed linked trait records:
+//   trait base = 120000000 + ((sigil UnitID - 30000) * 100)
+// Slot 1 uses the base UnitID and Slot 2 uses base + 1.  The shared MOD window
+// exposes the sigil and both linked trait IDs/levels together. The normal
+// Current Traits logical tree is hidden; raw physical sections remain available.
+constexpr std::array<LogicalFieldDefinition, 7> kCurrentSigilFields{{
     {0x0A8FU, 0U, "FF8F0A", "Sigil ID", "Confirmed", LogicalValueKind::Hash, false,
      "Sigils", false},
     {0x0A90U, 0U, "FF900A", "Sigil Level", "Confirmed", LogicalValueKind::Signed, false},
     {0x0A92U, 0U, "FF920A", "Equipped / Worn By", "Confirmed", LogicalValueKind::Hash, false,
      "Characters", false},
+    {0x06A5U, 0U, "FFA506", "Trait Slot 1 ID", "Confirmed", LogicalValueKind::Hash, false,
+     "Trait", false, LogicalFieldUnitScope::SigilTrait1},
+    {0x06A6U, 0U, "FFA606", "Trait Slot 1 Level", "Confirmed", LogicalValueKind::Signed, false,
+     {}, false, LogicalFieldUnitScope::SigilTrait1},
+    {0x06A5U, 0U, "FFA506", "Trait Slot 2 ID", "Confirmed", LogicalValueKind::Hash, false,
+     "Trait", false, LogicalFieldUnitScope::SigilTrait2},
+    {0x06A6U, 0U, "FFA606", "Trait Slot 2 Level", "Confirmed", LogicalValueKind::Signed, false,
+     {}, false, LogicalFieldUnitScope::SigilTrait2},
 }};
 
 constexpr LogicalFamilyDefinition kCurrentSigilsFamily{
@@ -193,10 +239,10 @@ constexpr LogicalFamilyDefinition kQuickValuesFamily{
 constexpr std::array<const LogicalFamilyDefinition*, 9> kSharedLogicalFamilies{{
     &kQuickValuesFamily,
     &kSummonFamily,
-    &kCurrentTraitsFamily,
     &kOverMasteryFamily,
     &kItemsFamily,
     &kWeaponsFamily,
+    &kWrightstonesFamily,
     &kCurrentSigilsFamily,
     &kAcquiredSigilsFamily,
     &kCuriosFamily,
@@ -210,6 +256,7 @@ const LogicalFamilyDefinition& currentTraitsFamily() noexcept { return kCurrentT
 const LogicalFamilyDefinition& overMasteryFamily() noexcept { return kOverMasteryFamily; }
 const LogicalFamilyDefinition& itemsFamily() noexcept { return kItemsFamily; }
 const LogicalFamilyDefinition& weaponsFamily() noexcept { return kWeaponsFamily; }
+const LogicalFamilyDefinition& wrightstonesFamily() noexcept { return kWrightstonesFamily; }
 const LogicalFamilyDefinition& currentSigilsFamily() noexcept { return kCurrentSigilsFamily; }
 const LogicalFamilyDefinition& acquiredSigilsFamily() noexcept { return kAcquiredSigilsFamily; }
 const LogicalFamilyDefinition& curiosFamily() noexcept { return kCuriosFamily; }
@@ -367,6 +414,7 @@ const LogicalFamilyDefinition* logicalFamilyForAnchor(std::uint32_t anchorKey) n
     if (anchorKey == kOverMasteryFamily.anchorKey) return &kOverMasteryFamily;
     if (anchorKey == kItemsFamily.anchorKey) return &kItemsFamily;
     if (anchorKey == kWeaponsFamily.anchorKey) return &kWeaponsFamily;
+    if (anchorKey == kWrightstonesFamily.anchorKey) return &kWrightstonesFamily;
     if (anchorKey == kCurrentSigilsFamily.anchorKey) return &kCurrentSigilsFamily;
     if (anchorKey == kAcquiredSigilsFamily.anchorKey) return &kAcquiredSigilsFamily;
     if (anchorKey == kCuriosFamily.anchorKey) return &kCuriosFamily;
@@ -436,8 +484,40 @@ LogicalUnitAddress decodeLogicalUnitId(const LogicalFamilyDefinition& family,
 
 std::uint32_t logicalFieldRecordUnitId(const LogicalFieldDefinition& field,
                                        std::uint32_t logicalUnitId) noexcept {
-    if (field.unitScope == LogicalFieldUnitScope::CurioSlot) {
+    switch (field.unitScope) {
+    case LogicalFieldUnitScope::CurioSlot:
         return logicalUnitId / 100U;
+    case LogicalFieldUnitScope::SigilTrait1:
+    case LogicalFieldUnitScope::SigilTrait2: {
+        constexpr std::uint32_t kSigilUnitIdBase = 30000U;
+        constexpr std::uint32_t kSigilTraitNamespaceBase = 120000000U;
+        if (logicalUnitId < kSigilUnitIdBase) return 0xFFFFFFFFU;
+        const auto sigilIndex = logicalUnitId - kSigilUnitIdBase;
+        const auto traitSlot = field.unitScope == LogicalFieldUnitScope::SigilTrait2 ? 1U : 0U;
+        const auto maxIndex =
+            (std::numeric_limits<std::uint32_t>::max() - kSigilTraitNamespaceBase - traitSlot) /
+            100U;
+        if (sigilIndex > maxIndex) return 0xFFFFFFFFU;
+        return kSigilTraitNamespaceBase + sigilIndex * 100U + traitSlot;
+    }
+    case LogicalFieldUnitScope::WrightstoneTrait1:
+    case LogicalFieldUnitScope::WrightstoneTrait2:
+    case LogicalFieldUnitScope::WrightstoneTrait3: {
+        constexpr std::uint32_t kWrightstoneUnitIdBase = 50000U;
+        constexpr std::uint32_t kWrightstoneTraitNamespaceBase = 140000000U;
+        if (logicalUnitId < kWrightstoneUnitIdBase) return 0xFFFFFFFFU;
+        const auto wrightstoneIndex = logicalUnitId - kWrightstoneUnitIdBase;
+        std::uint32_t traitSlot = 0U;
+        if (field.unitScope == LogicalFieldUnitScope::WrightstoneTrait2) traitSlot = 1U;
+        if (field.unitScope == LogicalFieldUnitScope::WrightstoneTrait3) traitSlot = 2U;
+        const auto maxIndex =
+            (std::numeric_limits<std::uint32_t>::max() -
+             kWrightstoneTraitNamespaceBase - traitSlot) / 100U;
+        if (wrightstoneIndex > maxIndex) return 0xFFFFFFFFU;
+        return kWrightstoneTraitNamespaceBase + wrightstoneIndex * 100U + traitSlot;
+    }
+    case LogicalFieldUnitScope::Entry:
+        return logicalUnitId;
     }
     return logicalUnitId;
 }

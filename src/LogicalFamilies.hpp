@@ -31,7 +31,12 @@ enum class LogicalGroupingKind {
 
 enum class LogicalFieldUnitScope {
     Entry,
-    CurioSlot
+    CurioSlot,
+    SigilTrait1,
+    SigilTrait2,
+    WrightstoneTrait1,
+    WrightstoneTrait2,
+    WrightstoneTrait3
 };
 
 struct LogicalUnitAddress {
@@ -118,6 +123,7 @@ struct CurioSlotNormalizationResult {
 [[nodiscard]] const LogicalFamilyDefinition& overMasteryFamily() noexcept;
 [[nodiscard]] const LogicalFamilyDefinition& itemsFamily() noexcept;
 [[nodiscard]] const LogicalFamilyDefinition& weaponsFamily() noexcept;
+[[nodiscard]] const LogicalFamilyDefinition& wrightstonesFamily() noexcept;
 [[nodiscard]] const LogicalFamilyDefinition& currentSigilsFamily() noexcept;
 [[nodiscard]] const LogicalFamilyDefinition& acquiredSigilsFamily() noexcept;
 [[nodiscard]] const LogicalFamilyDefinition& curiosFamily() noexcept;

@@ -13,12 +13,13 @@ rem Always configure from a clean build tree so stale post-build commands do not
 if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
 if exist "%BUILD_DIR%" goto :cleanup_fail
 
-echo Configuring GBFR - TOOL v1.06 x64 Release build...
+echo Configuring GBFR - TOOL v1.10 x64 Release build...
 cmake -S . -B "%BUILD_DIR%" -A x64 -DGBFR_TOOL_BUILD_TESTS=ON >>"%LOG_FILE%" 2>&1
 if errorlevel 1 goto :fail
 
 echo Building GUI, CLI, and tests...
-cmake --build "%BUILD_DIR%" --config Release --parallel >>"%LOG_FILE%" 2>&1
+rem Build serially so Visual Studio does not launch overlapping CMake reconfigure checks.
+cmake --build "%BUILD_DIR%" --config Release --parallel 1 >>"%LOG_FILE%" 2>&1
 if errorlevel 1 goto :fail
 
 echo Running tests...

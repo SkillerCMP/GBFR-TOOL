@@ -6,7 +6,7 @@
   >
 </p>
 <h1 align="center">Granblue Fantasy: Relink - Save Tool</h1>
-<h3 align="center">GBFR - TOOL v1.06</h3>
+<h3 align="center">GBFR - TOOL v1.10</h3>
 
 <p align="center">
   <a href="https://github.com/SkillerCMP/GBFR-TOOL/releases">
@@ -41,7 +41,11 @@ Granblue Fantasy: Relink save data.
 ### Features
 
 - Logical save-data editors with one in-memory `MOD` action per editor
-- Right-click bulk MOD editors for Summons, Weapons, Sigils, Items, Traits, OverMastery, and Mastery Tree groups
+- Combined Current Sigil MOD window with both linked trait IDs and levels
+- Combined Wrightstone MOD window with parent fields, lock state, three linked traits, and derived attachment status
+- Character-grouped Weapons tree with equipped markers and a combined Weapon MOD window
+- Shared Weapon Game Rules mode for normal setup-trait and appearance restrictions or unrestricted modding
+- Right-click bulk MOD editors for Summons, Weapons, Wrightstones, Sigils, Items, OverMastery, and Mastery Tree groups
 - Per-field `ON` / `OFF` exclusion controls in every bulk editor; all fields start disabled
 - Protected Item bulk editing that excludes Curios, Rupies, Mastery Points, Conflux Points, and Resonance Points
 - Item `MAX All` command for setting eligible non-empty Item counts to `9999`
@@ -56,6 +60,131 @@ Granblue Fantasy: Relink save data.
 
 </details>
 
+<details>
+<summary><strong>⚔️ Character-Grouped Weapon MOD Window</strong></summary>
+
+<br>
+
+Owned weapons are grouped in the tree under the character they belong to. The grouping
+is resolved from a compact editor-specific mapping compiled into the program. The raw
+`weapon.tbl` and `weapon_skill_level_rebuild.tbl` files are not included or required at runtime.
+
+The currently equipped copy is marked using the character equipment reference stored in
+`0x057A`:
+
+```text
+Weapons
+└─ Maglielle
+   ├─ Excalibur - Slot 154 [Equipped]
+   └─ Exo Maitrah Karuna - Slot 178
+```
+
+Clicking a weapon opens one combined **Weapon MOD** window containing:
+
+- Weapon ID, XP, Level Cap, and Mirage Munitions
+- Weapon Appearance / Skin ID (`0x0AFE`)
+- Four visible Weapon Setup trait slots
+- Attached Wrightstone Item ID
+- Three copied attached-Wrightstone Trait IDs and levels (`130...` namespace)
+- Equipped status and an option to equip the selected weapon to its owning character
+
+### Weapon Game Rules
+
+**Game Rules ON** is the default whenever the window opens. Fixed setup slots are read-only,
+swap-active slots only accept permitted traits, and the appearance picker lists only skins
+from the same character that are marked available in the loaded save. `887AE0B0` restores
+the weapon's normal/default appearance.
+
+With **Game Rules OFF**, all four visible setup slots accept any known trait, an empty value,
+or a manually entered hash. Weapon Appearance also accepts every known appearance save key
+and manual hashes, including cross-character models. Unsupported combinations may display
+incorrectly, be invisible, or have no effect in-game. The fifth underlying setup value is
+reserved and is never changed by this window.
+
+Appearance availability is read from the paired `0x1CE9` / `0x1CEB` lists. GBFR-TOOL treats
+state bit `0x04` as available for filtering and does not modify either unlock list.
+
+The save-side Weapon ID can differ from the public weapon hash used by the name database.
+GBFR-TOOL preserves both mappings so names remain correct while the proper save selector key
+is written back.
+
+All fields are applied together to the loaded save in memory with one **MOD** button.
+
+The Weapon window no longer edits the `140...` namespace. Those records belong to Wrightstone inventory entries and are edited from the Wrightstones tree.
+
+</details>
+
+<details>
+<summary><strong>💎 Combined Wrightstone MOD Window</strong></summary>
+
+<br>
+
+Only occupied Wrightstone inventory slots are shown in the normal tree. Locked entries are marked `[Locked]`. A unique composite attachment is marked `[Attached]`; duplicate matches are marked `[Possible Attached]`. Clicking one opens a combined window containing:
+
+- Wrightstone ID (`FF3608` / `0x0836`)
+- Instance / companion value (`FF3708` / `0x0837`)
+- Locked flag (`FF3808` / `0x0838`)
+- State / type value (`FF3908` / `0x0839`)
+- Three linked Trait IDs and levels (`FFA506` / `FFA606`)
+
+The linked UnitID relationship is:
+
+```text
+Wrightstone slot = Wrightstone UnitID - 50000
+Trait base       = 140000000 + (Wrightstone slot * 100)
+
+Trait Slot 1 = Trait base
+Trait Slot 2 = Trait base + 1
+Trait Slot 3 = Trait base + 2
+```
+
+The window includes an **Attachment Status** indicator. The save does not expose a confirmed unique pointer from a weapon back to one Wrightstone inventory copy, so GBFR-TOOL compares the Wrightstone ID plus all three Trait IDs and levels with the copied `130...` weapon traits. A unique composite match is shown as attached; duplicate copies are labelled as an ambiguous possible match rather than falsely identifying one inventory copy.
+
+</details>
+
+<details>
+<summary><strong>💠 Combined Current Sigil MOD Window</strong></summary>
+
+<br>
+
+Clicking an owned sigil in the `Current Sigils` tree opens one combined window containing:
+
+- Sigil ID (`FF8F0A` / `0x0A8F`)
+- Sigil level (`FF900A` / `0x0A90`)
+- Equipped / Worn By (`FF920A` / `0x0A92`)
+- Trait Slot 1 ID and level (`FFA506` / `FFA606`)
+- Trait Slot 2 ID and level (`FFA506` / `FFA606`)
+
+The sigil inventory record and trait records are physically separate in the save. GBFR-TOOL
+links them with the confirmed UnitID relationship:
+
+```text
+Sigil index = Sigil UnitID - 30000
+Trait base  = 120000000 + (Sigil index * 100)
+
+Trait Slot 1 UnitID = Trait base
+Trait Slot 2 UnitID = Trait base + 1
+```
+
+Example for Sigil UnitID `30259`:
+
+```text
+Sigil Slot 259
+├── Trait Slot 1: UnitID 120025900
+└── Trait Slot 2: UnitID 120025901
+```
+
+Normal one-trait sigils still contain the second linked record. Its Trait Slot 2 ID is
+`887AE0B0` (`Global Empty Slot`). Selecting that value preserves a single-trait sigil.
+
+The single **MOD** button writes the sigil and both linked trait slots together to the loaded
+save in memory. The normal `Current Traits` logical tree is no longer shown because the known
+`120...`, `130...`, and `140...` namespaces are now exposed through their parent Sigil, Weapon,
+and Wrightstone editors. The raw physical `FFA506` and `FFA606` sections remain available for
+research and recovery.
+
+</details>
+
 
 <details>
 <summary><strong>🖱️ Right-Click Bulk MOD Editors</strong></summary>
@@ -66,9 +195,9 @@ The following tree groups provide a right-click **MOD All Non-Empty Slots** comm
 
 - `Summon Inventory`
 - `Weapons`
+- `Wrightstones`
 - `Current Sigils`
 - `Items`
-- Character groups under `Current Traits`
 - Character groups under `OverMastery`
 - Character groups and `Shared / Global` under `Mastery Tree`
 
@@ -307,3 +436,7 @@ Created for **the community and the scene**.
 
 Special thanks to everyone who has contributed research, testing,
 documentation, tools, and knowledge to the Granblue Fantasy: Relink community.
+
+## v1.09.1 Windows build note
+
+The Windows resource file is now static and the provided build script builds projects serially. This prevents overlapping Visual Studio CMake regeneration checks from racing on generated resource files.

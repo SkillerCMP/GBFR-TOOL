@@ -17,6 +17,7 @@
 #include "RelationshipMap.hpp"
 #include "SectionNames.hpp"
 #include "ValueDecoder.hpp"
+#include "WeaponRules.hpp"
 #include "version.hpp"
 
 #include <algorithm>
@@ -114,6 +115,7 @@ constexpr UINT WM_APP_MASTERY_MOD_CLOSED = WM_APP + 2U;
 constexpr UINT WM_APP_LOGICAL_MOD_CLOSED = WM_APP + 3U;
 constexpr UINT WM_APP_BULK_MOD_CLOSED = WM_APP + 4U;
 constexpr UINT WM_APP_FOCUS_LOGICAL_FAMILY = WM_APP + 5U;
+constexpr UINT WM_APP_WEAPON_MOD_CLOSED = WM_APP + 6U;
 
 HMENU controlId(UINT id) noexcept {
     return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id));
@@ -180,6 +182,14 @@ std::wstring logicalUnitSummaryW(const gdtv::LogicalFamilyDefinition& family,
         return L"Character " + numberW(address.characterGroup) + L" / Slot " +
                numberW(address.slot);
     case gdtv::LogicalGroupingKind::Flat:
+        if (family.anchorKey == gdtv::currentSigilsFamily().anchorKey && address.slot >= 30000U) {
+            return utf8ToWide(std::string(family.slotLabel)) + L" " +
+                   numberW(address.slot - 30000U) + L" (UnitID " + numberW(address.slot) + L")";
+        }
+        if (family.anchorKey == gdtv::wrightstonesFamily().anchorKey && address.slot >= 50000U) {
+            return utf8ToWide(std::string(family.slotLabel)) + L" " +
+                   numberW(address.slot - 50000U) + L" (UnitID " + numberW(address.slot) + L")";
+        }
         return utf8ToWide(std::string(family.slotLabel)) + L" " + numberW(address.slot);
     case gdtv::LogicalGroupingKind::CurioSlotEntries:
         return L"Slot " + numberW(address.slot + 1U) + L" / Reward Entry " +
@@ -1528,14 +1538,1105 @@ HWND createMasteryTreeModWindow(HWND owner, MasteryTreeModDialogContext& context
     return dialog;
 }
 
+constexpr std::size_t kVisibleWeaponSetupSlots = 4U;
+constexpr std::size_t kWeaponLinkedTraitSlots = 3U;
 
-constexpr std::size_t kMaxSharedLogicalFields = 8U;
+struct WeaponModDialogContext {
+    HWND owner{};
+    HWND window{};
+    HWND titleLabel{};
+    HWND statusLabel{};
+    HWND ruleToggle{};
+    HWND ruleSummary{};
+    HWND equipCheck{};
+    HWND equippedLabel{};
+    HWND skinEdit{};
+    HWND skinHashButton{};
+    HWND skinResolved{};
+    HWND skinStateLabel{};
+    HWND skinSummary{};
+    HFONT font{};
+    HFONT boldFont{};
+    gdtv::SaveData* save{};
+    const gdtv::HashDatabase* hashDatabase{};
+    std::uint32_t unitId{};
+    std::uint32_t characterGroup{gdtv::kUnknownWeaponCharacterGroup};
+    std::wstring characterName;
+    bool gameRulesOn{true};
+    bool changed{};
+    bool suppressCloseNotification{};
+    std::array<HWND, 4> weaponInfoEdits{};
+    std::array<HWND, 4> weaponInfoResolved{};
+    std::array<HWND, kVisibleWeaponSetupSlots> setupEdits{};
+    std::array<HWND, kVisibleWeaponSetupSlots> setupHashButtons{};
+    std::array<HWND, kVisibleWeaponSetupSlots> setupResolved{};
+    std::array<HWND, kVisibleWeaponSetupSlots> setupStateLabels{};
+    std::array<HWND, kWeaponLinkedTraitSlots> imbuedTraitEdits{};
+    std::array<HWND, kWeaponLinkedTraitSlots> imbuedLevelEdits{};
+    std::array<HWND, kWeaponLinkedTraitSlots> imbuedResolved{};
+    HWND wrightstoneEdit{};
+    HWND wrightstoneResolved{};
+};
+
+constexpr UINT ID_WEAPON_INFO_EDIT_BASE = 4800;
+constexpr UINT ID_WEAPON_INFO_HASH = 4810;
+constexpr UINT ID_WEAPON_RULE_TOGGLE = 4820;
+constexpr UINT ID_WEAPON_SETUP_EDIT_BASE = 4830;
+constexpr UINT ID_WEAPON_SETUP_HASH_BASE = 4840;
+constexpr UINT ID_WEAPON_IMBUED_EDIT_BASE = 4850;
+constexpr UINT ID_WEAPON_IMBUED_LEVEL_BASE = 4860;
+constexpr UINT ID_WEAPON_IMBUED_HASH_BASE = 4870;
+constexpr UINT ID_WEAPON_WRIGHTSTONE_EDIT = 4880;
+constexpr UINT ID_WEAPON_WRIGHTSTONE_HASH = 4881;
+constexpr UINT ID_WEAPON_EQUIP_CHECK = 4920;
+constexpr UINT ID_WEAPON_APPLY = 4930;
+constexpr UINT ID_WEAPON_SKIN_EDIT = 4940;
+constexpr UINT ID_WEAPON_SKIN_HASH = 4941;
+
+constexpr std::uint32_t kWeaponSkinKey = 0x0AFEU;
+constexpr std::uint32_t kWeaponSkinCollectionKey = 0x1CE9U;
+constexpr std::uint32_t kWeaponSkinStateKey = 0x1CEBU;
+constexpr std::uint32_t kWeaponSkinAvailableBit = 0x04U;
+
+constexpr std::array<std::uint32_t, 4> kWeaponInfoKeys{{
+    0x0AF3U, 0x0AF4U, 0x0AF5U, 0x0AF6U
+}};
+
+bool weaponRecordElementAvailable(const gdtv::SaveData& save, std::uint32_t key,
+                                  std::uint32_t unitId, std::uint32_t elementIndex = 0U) {
+    const auto* record = save.findRecord(key, unitId);
+    return record && elementIndex < record->elementCount;
+}
+
+std::uint32_t weaponInventorySlot(std::uint32_t weaponUnitId) noexcept {
+    return weaponUnitId >= 40000U ? weaponUnitId - 40000U : weaponUnitId;
+}
+
+std::uint32_t weaponLinkedTraitUnitId(std::uint32_t nameSpace,
+                                     std::uint32_t weaponUnitId,
+                                     std::uint32_t traitSlot) noexcept {
+    return nameSpace * 10000000U + weaponInventorySlot(weaponUnitId) * 100U + traitSlot;
+}
+
+std::wstring weaponHashResolution(const gdtv::HashDatabase& database, std::uint32_t hash) {
+    if (gdtv::isGlobalEmptySlotHash(hash) || hash == 0U || hash == 0xFFFFFFFFU) {
+        return L"Empty / inactive";
+    }
+    const auto* entry = database.preferred(hash);
+    if (!entry) return L"Unknown hash";
+    std::wstring result;
+    if (!entry->displayName.empty()) result = utf8ToWide(entry->displayName);
+    if (!entry->id.empty()) {
+        if (!result.empty()) result += L" | ";
+        result += utf8ToWide(entry->id);
+    }
+    return result.empty() ? L"Known hash" : result;
+}
+
+std::wstring weaponDefinitionResolution(const gdtv::HashDatabase& database,
+                                          std::uint32_t saveWeaponHash) {
+    const auto* rule = gdtv::weaponRuleForHash(saveWeaponHash);
+    if (!rule) return weaponHashResolution(database, saveWeaponHash);
+    auto result = weaponHashResolution(database, gdtv::weaponDatabaseHash(*rule));
+    result += L" | Save key 0x" + hexW(saveWeaponHash, 8);
+    return result;
+}
+
+std::wstring weaponSkinResolution(const gdtv::HashDatabase& database,
+                                    std::uint32_t skinHash) {
+    if (gdtv::isGlobalEmptySlotHash(skinHash) || skinHash == 0U ||
+        skinHash == 0xFFFFFFFFU) {
+        return L"Default / normal weapon appearance";
+    }
+    return weaponDefinitionResolution(database, skinHash);
+}
+
+std::optional<std::uint32_t> parseWeaponSaveKeyText(
+    const std::wstring& inputText, const gdtv::HashDatabase& database,
+    std::wstring& error) {
+    const auto input = trimWide(inputText);
+    if (input.empty()) {
+        error = L"Enter a weapon save key, weapon name, or internal ID.";
+        return std::nullopt;
+    }
+    auto text = wideToUtf8(input);
+    bool raw = false;
+    if (text.size() >= 4U) {
+        auto prefix = text.substr(0U, 4U);
+        std::transform(prefix.begin(), prefix.end(), prefix.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (prefix == "raw:") {
+            raw = true;
+            text.erase(0U, 4U);
+        }
+    }
+    if (const auto parsed = gdtv::parseHashValue(text, raw)) {
+        if (gdtv::weaponRuleForHash(*parsed)) return *parsed;
+        const auto definitions = gdtv::weaponRulesForDisplayHash(*parsed);
+        if (definitions.size == 1U) return definitions.data->weaponHash;
+        if (definitions.size > 1U) {
+            error = L"That public weapon hash has multiple save-key variants. Use Hash List to select the exact one.";
+            return std::nullopt;
+        }
+        return *parsed;
+    }
+
+    std::vector<std::uint32_t> candidates;
+    const auto addDisplayCandidates = [&candidates](std::uint32_t hash) {
+        if (gdtv::weaponRuleForHash(hash)) candidates.push_back(hash);
+        const auto definitions = gdtv::weaponRulesForDisplayHash(hash);
+        for (const auto& definition : definitions) candidates.push_back(definition.weaponHash);
+    };
+    for (const auto hash : database.hashesForText(text)) addDisplayCandidates(hash);
+    if (candidates.empty()) addDisplayCandidates(gdtv::xxHash32Custom(text));
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+    if (candidates.size() == 1U) return candidates.front();
+    if (candidates.size() > 1U) {
+        error = L"That weapon name has multiple save-key variants. Use Hash List to select the exact one.";
+        return std::nullopt;
+    }
+    return gdtv::xxHash32Custom(text);
+}
+
+std::vector<gdtv::HashEntry> weaponSaveKeyPickerEntries(
+    const gdtv::HashDatabase& database) {
+    std::vector<gdtv::HashEntry> result;
+    const auto rules = gdtv::weaponRules();
+    result.reserve(rules.size);
+    for (const auto& rule : rules) {
+        const auto databaseHash = gdtv::weaponDatabaseHash(rule);
+        gdtv::HashEntry entry;
+        if (const auto* named = database.preferred(databaseHash)) entry = *named;
+        entry.hash = rule.weaponHash;
+        if (entry.displayName.empty()) {
+            entry.displayName = "Weapon 0x" + gdtv::hashHex(databaseHash);
+        }
+        if (entry.category.empty()) entry.category = "Weapons";
+        entry.notes += (entry.notes.empty() ? "" : " | ");
+        if (databaseHash != rule.weaponHash) {
+            entry.notes += "Save selector for public hash 0x" + gdtv::hashHex(databaseHash);
+        } else {
+            entry.notes += "Save selector is also the database weapon hash";
+        }
+        result.push_back(std::move(entry));
+    }
+    return result;
+}
+
+std::optional<std::uint32_t> parseWeaponHashText(const std::wstring& inputText,
+                                                  const gdtv::HashDatabase& database,
+                                                  std::wstring& error) {
+    const auto input = trimWide(inputText);
+    if (input.empty()) {
+        error = L"Enter a trait, item, or weapon hash.";
+        return std::nullopt;
+    }
+    auto text = wideToUtf8(input);
+    bool raw = false;
+    if (text.size() >= 4U) {
+        auto prefix = text.substr(0U, 4U);
+        std::transform(prefix.begin(), prefix.end(), prefix.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (prefix == "raw:") {
+            raw = true;
+            text.erase(0U, 4U);
+        }
+    }
+    if (const auto parsed = gdtv::parseHashValue(text, raw)) return *parsed;
+    const auto lowered = lowerWide(utf8ToWide(text));
+    if (lowered == L"global empty slot" || lowered == L"empty slot" || lowered == L"empty") {
+        return gdtv::kGlobalEmptySlotHash;
+    }
+    const auto matches = database.hashesForText(text);
+    if (matches.size() == 1U) return matches.front();
+    if (matches.size() > 1U) {
+        error = L"That text matches multiple hashes. Use Hash List to select the exact entry.";
+        return std::nullopt;
+    }
+    return gdtv::xxHash32Custom(text);
+}
+
+std::optional<std::uint32_t> parseWeaponNumberText(const std::wstring& inputText,
+                                                    bool signedValue,
+                                                    std::wstring& error) {
+    const auto input = trimWide(inputText);
+    if (input.empty()) {
+        error = L"Enter a numeric value.";
+        return std::nullopt;
+    }
+    try {
+        if (input.size() > 4U && lowerWide(input.substr(0U, 4U)) == L"raw:") {
+            const auto parsed = gdtv::parseHashValue(wideToUtf8(input.substr(4U)), true);
+            if (!parsed) throw std::invalid_argument("raw");
+            return *parsed;
+        }
+        if (input.size() > 2U && input[0] == L'0' && (input[1] == L'x' || input[1] == L'X')) {
+            std::size_t used = 0U;
+            const auto value = std::stoull(input.substr(2U), &used, 16);
+            if (used != input.size() - 2U || value > 0xFFFFFFFFULL) {
+                throw std::out_of_range("hex");
+            }
+            return static_cast<std::uint32_t>(value);
+        }
+        std::size_t used = 0U;
+        if (signedValue) {
+            const auto value = std::stoll(input, &used, 10);
+            if (used != input.size() || value < std::numeric_limits<std::int32_t>::min() ||
+                value > std::numeric_limits<std::int32_t>::max()) {
+                throw std::out_of_range("signed");
+            }
+            return static_cast<std::uint32_t>(static_cast<std::int32_t>(value));
+        }
+        const auto value = std::stoull(input, &used, 10);
+        if (used != input.size() || value > 0xFFFFFFFFULL) throw std::out_of_range("unsigned");
+        return static_cast<std::uint32_t>(value);
+    } catch (...) {
+        error = L"Enter decimal, 0x canonical hexadecimal, or raw:XXXXXXXX bytes.";
+        return std::nullopt;
+    }
+}
+
+std::vector<gdtv::HashEntry> weaponRulePickerEntries(
+    const gdtv::HashDatabase& database, std::uint32_t groupHash) {
+    std::vector<gdtv::HashEntry> result;
+    const auto choices = gdtv::weaponTraitChoices(groupHash);
+    result.reserve(choices.size);
+    for (const auto hash : choices) {
+        if (const auto* entry = database.preferred(hash)) {
+            result.push_back(*entry);
+        } else {
+            gdtv::HashEntry fallbackEntry;
+            fallbackEntry.hash = hash;
+            fallbackEntry.displayName = "Trait 0x" + gdtv::hashHex(hash);
+            fallbackEntry.category = "Trait";
+            fallbackEntry.builtInFriendly = true;
+            result.push_back(std::move(fallbackEntry));
+        }
+    }
+    return result;
+}
+
+std::uint32_t currentWeaponHash(const WeaponModDialogContext& context) {
+    if (!context.save || !weaponRecordElementAvailable(*context.save, 0x0AF3U, context.unitId)) return 0U;
+    return static_cast<std::uint32_t>(context.save->elementBits(0x0AF3U, context.unitId, 0U));
+}
+
+const gdtv::WeaponRuleDefinition* typedWeaponRule(const WeaponModDialogContext& context) {
+    if (!context.hashDatabase) return nullptr;
+    std::wstring ignored;
+    const auto parsed = parseWeaponSaveKeyText(getWindowTextString(context.weaponInfoEdits[0]),
+                                               *context.hashDatabase, ignored);
+    return gdtv::weaponRuleForHash(parsed.value_or(currentWeaponHash(context)));
+}
+
+bool weaponIsEquipped(const WeaponModDialogContext& context) {
+    if (!context.save || context.characterGroup == gdtv::kUnknownWeaponCharacterGroup) return false;
+    const auto characterUnitId = 10000U + context.characterGroup;
+    if (!weaponRecordElementAvailable(*context.save, 0x057AU, characterUnitId)) return false;
+    const auto stored = static_cast<std::uint32_t>(
+        context.save->elementBits(0x057AU, characterUnitId, 0U));
+    return stored == weaponInventorySlot(context.unitId) + 3U;
+}
+
+bool weaponSkinAvailableInSave(const gdtv::SaveData& save, std::uint32_t skinHash) {
+    const auto* collection = save.findGroup(kWeaponSkinCollectionKey);
+    if (!collection) return false;
+    for (const auto& record : collection->records) {
+        if (record.elementCount == 0U) continue;
+        const auto value = static_cast<std::uint32_t>(
+            save.elementBits(kWeaponSkinCollectionKey, record.index, 0U));
+        if (value != skinHash ||
+            !weaponRecordElementAvailable(save, kWeaponSkinStateKey, record.index)) {
+            continue;
+        }
+        const auto state = static_cast<std::uint32_t>(
+            save.elementBits(kWeaponSkinStateKey, record.index, 0U));
+        if ((state & kWeaponSkinAvailableBit) != 0U) return true;
+    }
+    return false;
+}
+
+std::uint32_t currentWeaponSkinHash(const WeaponModDialogContext& context) {
+    if (!context.save ||
+        !weaponRecordElementAvailable(*context.save, kWeaponSkinKey, context.unitId)) {
+        return gdtv::kGlobalEmptySlotHash;
+    }
+    return static_cast<std::uint32_t>(
+        context.save->elementBits(kWeaponSkinKey, context.unitId, 0U));
+}
+
+bool weaponSkinCompatible(const gdtv::WeaponRuleDefinition* weaponRule,
+                          std::uint32_t skinHash) {
+    if (gdtv::isGlobalEmptySlotHash(skinHash) || skinHash == 0U || skinHash == 0xFFFFFFFFU) {
+        return true;
+    }
+    const auto* skinRule = gdtv::weaponRuleForHash(skinHash);
+    return weaponRule && skinRule &&
+           weaponRule->characterGroup != gdtv::kUnknownWeaponCharacterGroup &&
+           weaponRule->characterGroup == skinRule->characterGroup;
+}
+
+std::vector<gdtv::HashEntry> weaponSkinPickerEntries(
+    const WeaponModDialogContext& context, bool gameRulesOn) {
+    std::vector<gdtv::HashEntry> result;
+    if (!context.hashDatabase) return result;
+
+    gdtv::HashEntry defaultEntry;
+    defaultEntry.hash = gdtv::kGlobalEmptySlotHash;
+    defaultEntry.displayName = "Default Weapon Appearance";
+    defaultEntry.category = "Weapons";
+    defaultEntry.notes = "Use the weapon's normal appearance";
+    defaultEntry.builtInFriendly = true;
+    result.push_back(std::move(defaultEntry));
+
+    const auto* baseRule = typedWeaponRule(context);
+    const auto currentSkin = currentWeaponSkinHash(context);
+    std::unordered_set<std::uint32_t> added{gdtv::kGlobalEmptySlotHash};
+    const auto rules = gdtv::weaponRules();
+    for (const auto& rule : rules) {
+        if (gameRulesOn) {
+            if (!baseRule || baseRule->characterGroup == gdtv::kUnknownWeaponCharacterGroup ||
+                rule.characterGroup != baseRule->characterGroup) {
+                continue;
+            }
+            if (rule.weaponHash != currentSkin &&
+                (!context.save || !weaponSkinAvailableInSave(*context.save, rule.weaponHash))) {
+                continue;
+            }
+        }
+        if (!added.insert(rule.weaponHash).second) continue;
+        const auto databaseHash = gdtv::weaponDatabaseHash(rule);
+        gdtv::HashEntry entry;
+        if (const auto* named = context.hashDatabase->preferred(databaseHash)) entry = *named;
+        entry.hash = rule.weaponHash;
+        if (entry.displayName.empty()) {
+            entry.displayName = "Weapon Appearance 0x" + gdtv::hashHex(databaseHash);
+        }
+        if (entry.category.empty()) entry.category = "Weapons";
+        entry.notes += (entry.notes.empty() ? "" : " | ");
+        entry.notes += "Appearance save key 0x" + gdtv::hashHex(rule.weaponHash);
+        if (context.save && weaponSkinAvailableInSave(*context.save, rule.weaponHash)) {
+            entry.notes += " | Available in this save";
+        }
+        result.push_back(std::move(entry));
+    }
+    return result;
+}
+
+std::wstring weaponSkinStateText(const WeaponModDialogContext& context,
+                                 std::uint32_t skinHash) {
+    if (gdtv::isGlobalEmptySlotHash(skinHash) || skinHash == 0U || skinHash == 0xFFFFFFFFU) {
+        return L"Default";
+    }
+    const auto* baseRule = typedWeaponRule(context);
+    const auto* skinRule = gdtv::weaponRuleForHash(skinHash);
+    if (!baseRule || !skinRule) return L"Unknown mapping";
+    if (baseRule->characterGroup != skinRule->characterGroup) return L"Different character";
+    if (!context.save) return L"Compatible";
+    return weaponSkinAvailableInSave(*context.save, skinHash)
+        ? L"Compatible / available"
+        : L"Compatible / not unlocked";
+}
+
+void updateWeaponSkinControlState(WeaponModDialogContext& context) {
+    if (!context.skinEdit || !context.hashDatabase) return;
+    const bool present = context.save &&
+        weaponRecordElementAvailable(*context.save, kWeaponSkinKey, context.unitId);
+    EnableWindow(context.skinEdit, present ? TRUE : FALSE);
+    SendMessageW(context.skinEdit, EM_SETREADONLY,
+                 present && !context.gameRulesOn ? FALSE : TRUE, 0);
+    EnableWindow(context.skinHashButton, present ? TRUE : FALSE);
+
+    std::wstring ignored;
+    const auto parsed = parseWeaponSaveKeyText(getWindowTextString(context.skinEdit),
+                                               *context.hashDatabase, ignored);
+    const auto skinHash = parsed.value_or(currentWeaponSkinHash(context));
+    SetWindowTextW(context.skinStateLabel,
+                   (context.gameRulesOn ? weaponSkinStateText(context, skinHash)
+                                        : L"Unrestricted").c_str());
+    SetWindowTextW(context.skinSummary,
+        context.gameRulesOn
+            ? L"Game Rules ON: only available appearances from this weapon's character are listed."
+            : L"Warning: all known appearances and manual hashes are allowed; cross-character models may fail.");
+}
+
+void setWeaponHashControl(HWND edit, HWND resolved, std::uint32_t value,
+                          const gdtv::HashDatabase& database) {
+    SetWindowTextW(edit, hexW(value, 8).c_str());
+    if (resolved) SetWindowTextW(resolved, weaponHashResolution(database, value).c_str());
+}
+
+void updateWeaponSetupControlState(WeaponModDialogContext& context) {
+    const auto* rule = typedWeaponRule(context);
+    for (std::size_t slot = 0U; slot < kVisibleWeaponSetupSlots; ++slot) {
+        const bool present = context.save &&
+            weaponRecordElementAvailable(*context.save, 0x0B02U, context.unitId,
+                                         static_cast<std::uint32_t>(slot));
+        bool editable = false;
+        std::wstring state;
+        if (!present) {
+            state = L"Not present";
+        } else if (!context.gameRulesOn) {
+            editable = true;
+            state = L"Unrestricted";
+        } else if (!rule) {
+            state = L"No derived rule";
+        } else {
+            const auto choices = gdtv::weaponTraitChoices(rule->traitGroupHashes[slot]);
+            std::wstring ignored;
+            const auto current = parseWeaponHashText(getWindowTextString(context.setupEdits[slot]),
+                                                     *context.hashDatabase, ignored)
+                                     .value_or(gdtv::kGlobalEmptySlotHash);
+            const bool inactive = current == 0U || current == 0xFFFFFFFFU ||
+                                  gdtv::isGlobalEmptySlotHash(current);
+            if (inactive) {
+                state = L"Inactive";
+            } else if (choices.size > 1U) {
+                editable = true;
+                state = L"Swap Active - " + numberW(choices.size) + L" choices";
+            } else if (choices.size == 1U) {
+                state = L"Fixed";
+            } else {
+                state = L"No choices";
+            }
+        }
+        EnableWindow(context.setupEdits[slot], present ? TRUE : FALSE);
+        SendMessageW(context.setupEdits[slot], EM_SETREADONLY, editable ? FALSE : TRUE, 0);
+        EnableWindow(context.setupHashButtons[slot], editable ? TRUE : FALSE);
+        SetWindowTextW(context.setupStateLabels[slot], state.c_str());
+    }
+
+    if (context.ruleToggle) {
+        SendMessageW(context.ruleToggle, BM_SETCHECK,
+                     context.gameRulesOn ? BST_CHECKED : BST_UNCHECKED, 0);
+        SetWindowTextW(context.ruleToggle,
+                       context.gameRulesOn ? L"Game Rules: ON" : L"Game Rules: OFF");
+    }
+    if (context.ruleSummary) {
+        if (context.gameRulesOn && rule) {
+            SetWindowTextW(context.ruleSummary,
+                L"Normal setup-slot rules and same-character available weapon appearances are enforced.");
+        } else if (context.gameRulesOn) {
+            SetWindowTextW(context.ruleSummary,
+                L"No compact rule mapping is available. Turn Game Rules OFF for manual editing.");
+        } else {
+            SetWindowTextW(context.ruleSummary,
+                L"Warning: setup traits and weapon appearance are unrestricted, including manual hashes.");
+        }
+    }
+    updateWeaponSkinControlState(context);
+}
+
+void refreshWeaponModWindow(WeaponModDialogContext& context) {
+    if (!context.save || !context.hashDatabase) return;
+    const auto weaponHash = currentWeaponHash(context);
+    const auto displayHash = gdtv::weaponDatabaseHashForSaveHash(weaponHash);
+    auto weaponName = utf8ToWide(gdtv::logicalHashDisplayName(*context.hashDatabase, displayHash));
+    if (weaponName.empty()) weaponName = L"Weapon 0x" + hexW(displayHash, 8);
+    const auto slot = weaponInventorySlot(context.unitId);
+    const auto title = weaponName + L" - Weapon Slot " + numberW(slot) + L" - MOD";
+    SetWindowTextW(context.window, title.c_str());
+    if (context.titleLabel) SetWindowTextW(context.titleLabel, title.c_str());
+
+    for (std::size_t index = 0U; index < kWeaponInfoKeys.size(); ++index) {
+        const auto key = kWeaponInfoKeys[index];
+        const bool present = weaponRecordElementAvailable(*context.save, key, context.unitId);
+        EnableWindow(context.weaponInfoEdits[index], present ? TRUE : FALSE);
+        if (!present) {
+            SetWindowTextW(context.weaponInfoEdits[index], L"<not present>");
+            continue;
+        }
+        const auto bits = static_cast<std::uint32_t>(context.save->elementBits(key, context.unitId, 0U));
+        if (index == 0U) {
+            SetWindowTextW(context.weaponInfoEdits[index], hexW(bits, 8).c_str());
+            SetWindowTextW(context.weaponInfoResolved[index],
+                           weaponDefinitionResolution(*context.hashDatabase, bits).c_str());
+        } else if (index >= 2U) {
+            SetWindowTextW(context.weaponInfoEdits[index],
+                           std::to_wstring(bitCopy<std::int32_t>(bits)).c_str());
+        } else {
+            SetWindowTextW(context.weaponInfoEdits[index], std::to_wstring(bits).c_str());
+        }
+    }
+
+    if (weaponRecordElementAvailable(*context.save, kWeaponSkinKey, context.unitId)) {
+        const auto skinHash = static_cast<std::uint32_t>(
+            context.save->elementBits(kWeaponSkinKey, context.unitId, 0U));
+        SetWindowTextW(context.skinEdit, hexW(skinHash, 8).c_str());
+        SetWindowTextW(context.skinResolved,
+                       weaponSkinResolution(*context.hashDatabase, skinHash).c_str());
+        EnableWindow(context.skinEdit, TRUE);
+        EnableWindow(context.skinHashButton, TRUE);
+    } else {
+        SetWindowTextW(context.skinEdit, L"<not present>");
+        SetWindowTextW(context.skinResolved, L"");
+        SetWindowTextW(context.skinStateLabel, L"Not present");
+        EnableWindow(context.skinEdit, FALSE);
+        EnableWindow(context.skinHashButton, FALSE);
+    }
+
+    for (std::size_t setupSlot = 0U; setupSlot < kVisibleWeaponSetupSlots; ++setupSlot) {
+        if (!weaponRecordElementAvailable(*context.save, 0x0B02U, context.unitId,
+                                          static_cast<std::uint32_t>(setupSlot))) {
+            SetWindowTextW(context.setupEdits[setupSlot], L"<not present>");
+            SetWindowTextW(context.setupResolved[setupSlot], L"");
+            continue;
+        }
+        const auto value = static_cast<std::uint32_t>(
+            context.save->elementBits(0x0B02U, context.unitId,
+                                      static_cast<std::uint32_t>(setupSlot)));
+        setWeaponHashControl(context.setupEdits[setupSlot], context.setupResolved[setupSlot],
+                             value, *context.hashDatabase);
+    }
+
+    for (std::size_t traitSlot = 0U; traitSlot < kWeaponLinkedTraitSlots; ++traitSlot) {
+        const auto imbuedUnit = weaponLinkedTraitUnitId(13U, context.unitId,
+                                                       static_cast<std::uint32_t>(traitSlot));
+        if (weaponRecordElementAvailable(*context.save, 0x06A5U, imbuedUnit)) {
+            const auto value = static_cast<std::uint32_t>(
+                context.save->elementBits(0x06A5U, imbuedUnit, 0U));
+            setWeaponHashControl(context.imbuedTraitEdits[traitSlot],
+                                 context.imbuedResolved[traitSlot], value,
+                                 *context.hashDatabase);
+            EnableWindow(context.imbuedTraitEdits[traitSlot], TRUE);
+        } else {
+            SetWindowTextW(context.imbuedTraitEdits[traitSlot], L"<not present>");
+            SetWindowTextW(context.imbuedResolved[traitSlot], L"");
+            EnableWindow(context.imbuedTraitEdits[traitSlot], FALSE);
+        }
+        if (weaponRecordElementAvailable(*context.save, 0x06A6U, imbuedUnit)) {
+            const auto value = static_cast<std::uint32_t>(
+                context.save->elementBits(0x06A6U, imbuedUnit, 0U));
+            SetWindowTextW(context.imbuedLevelEdits[traitSlot],
+                           std::to_wstring(bitCopy<std::int32_t>(value)).c_str());
+            EnableWindow(context.imbuedLevelEdits[traitSlot], TRUE);
+        } else {
+            SetWindowTextW(context.imbuedLevelEdits[traitSlot], L"<not present>");
+            EnableWindow(context.imbuedLevelEdits[traitSlot], FALSE);
+        }
+    }
+
+    if (weaponRecordElementAvailable(*context.save, 0x0B00U, context.unitId)) {
+        const auto value = static_cast<std::uint32_t>(
+            context.save->elementBits(0x0B00U, context.unitId, 0U));
+        setWeaponHashControl(context.wrightstoneEdit, context.wrightstoneResolved,
+                             value, *context.hashDatabase);
+        EnableWindow(context.wrightstoneEdit, TRUE);
+    } else {
+        SetWindowTextW(context.wrightstoneEdit, L"<not present>");
+        SetWindowTextW(context.wrightstoneResolved, L"");
+        EnableWindow(context.wrightstoneEdit, FALSE);
+    }
+
+
+    const bool equipped = weaponIsEquipped(context);
+    const auto ownerText = context.characterName.empty() ? L"owning character" : context.characterName;
+    const auto equipmentText = equipped
+        ? L"Equipped by: " + ownerText
+        : L"Not currently equipped by " + ownerText;
+    const auto equipActionText = L"Equip to " + ownerText + L" when MOD is pressed";
+    SetWindowTextW(context.equippedLabel, equipmentText.c_str());
+    SendMessageW(context.equipCheck, BM_SETCHECK, equipped ? BST_CHECKED : BST_UNCHECKED, 0);
+    EnableWindow(context.equipCheck,
+                 context.characterGroup != gdtv::kUnknownWeaponCharacterGroup && !equipped ? TRUE : FALSE);
+    SetWindowTextW(context.equipCheck, equipActionText.c_str());
+
+    updateWeaponSetupControlState(context);
+    SetWindowTextW(context.statusLabel,
+        L"Changes remain in memory until File > Save Edited ... As is used.");
+    ShowWindow(context.window, SW_SHOW);
+    SetForegroundWindow(context.window);
+}
+
+bool applyWeaponMod(WeaponModDialogContext& context) {
+    if (!context.save || !context.hashDatabase) return false;
+    std::array<std::uint32_t, 4> infoValues{};
+    std::array<std::uint32_t, kVisibleWeaponSetupSlots> setupValues{};
+    std::array<std::uint32_t, kWeaponLinkedTraitSlots> imbuedHashes{};
+    std::array<std::uint32_t, kWeaponLinkedTraitSlots> imbuedLevels{};
+    std::uint32_t wrightstoneHash{};
+    std::uint32_t skinHash{gdtv::kGlobalEmptySlotHash};
+
+    auto fail = [&context](const std::wstring& label, const std::wstring& error) {
+        MessageBoxW(context.window, (label + L": " + error).c_str(), L"Weapon MOD",
+                    MB_OK | MB_ICONERROR);
+        return false;
+    };
+
+    for (std::size_t index = 0U; index < kWeaponInfoKeys.size(); ++index) {
+        if (!weaponRecordElementAvailable(*context.save, kWeaponInfoKeys[index], context.unitId)) continue;
+        std::wstring error;
+        std::optional<std::uint32_t> value;
+        if (index == 0U) {
+            value = parseWeaponSaveKeyText(getWindowTextString(context.weaponInfoEdits[index]),
+                                           *context.hashDatabase, error);
+        } else {
+            value = parseWeaponNumberText(getWindowTextString(context.weaponInfoEdits[index]),
+                                          index >= 2U, error);
+        }
+        if (!value) return fail(index == 0U ? L"Weapon ID" : L"Weapon information", error);
+        infoValues[index] = *value;
+    }
+
+    const auto oldWeaponHash = currentWeaponHash(context);
+    const auto oldSkinHash = currentWeaponSkinHash(context);
+    if (weaponRecordElementAvailable(*context.save, kWeaponSkinKey, context.unitId)) {
+        std::wstring error;
+        const auto value = parseWeaponSaveKeyText(getWindowTextString(context.skinEdit),
+                                                  *context.hashDatabase, error);
+        if (!value) return fail(L"Weapon Appearance", error);
+        skinHash = *value;
+    }
+
+    const auto* rule = gdtv::weaponRuleForHash(infoValues[0]);
+    for (std::size_t slot = 0U; slot < kVisibleWeaponSetupSlots; ++slot) {
+        if (!weaponRecordElementAvailable(*context.save, 0x0B02U, context.unitId,
+                                          static_cast<std::uint32_t>(slot))) continue;
+        std::wstring error;
+        const auto value = parseWeaponHashText(getWindowTextString(context.setupEdits[slot]),
+                                               *context.hashDatabase, error);
+        if (!value) return fail(L"Weapon Setup Slot " + numberW(slot + 1U), error);
+        setupValues[slot] = *value;
+        if (context.gameRulesOn) {
+            const auto oldValue = static_cast<std::uint32_t>(
+                context.save->elementBits(0x0B02U, context.unitId,
+                                          static_cast<std::uint32_t>(slot)));
+            if (*value != oldValue) {
+                if (!rule) {
+                    return fail(L"Weapon Setup Slot " + numberW(slot + 1U),
+                                L"no derived rule exists for this Weapon ID. Turn Game Rules OFF for manual editing.");
+                }
+                const auto groupHash = rule->traitGroupHashes[slot];
+                const auto choices = gdtv::weaponTraitChoices(groupHash);
+                if (choices.size <= 1U || !gdtv::weaponTraitAllowed(groupHash, *value)) {
+                    return fail(L"Weapon Setup Slot " + numberW(slot + 1U),
+                                L"that trait is not permitted by this weapon's normal slot rules.");
+                }
+            }
+        }
+    }
+
+    if (context.gameRulesOn &&
+        weaponRecordElementAvailable(*context.save, kWeaponSkinKey, context.unitId) &&
+        (skinHash != oldSkinHash || infoValues[0] != oldWeaponHash)) {
+        if (!weaponSkinCompatible(rule, skinHash)) {
+            return fail(L"Weapon Appearance",
+                        L"that appearance is not compatible with this weapon's character. Turn Game Rules OFF for unrestricted editing.");
+        }
+        if (!gdtv::isGlobalEmptySlotHash(skinHash) && skinHash != 0U &&
+            skinHash != 0xFFFFFFFFU && skinHash != oldSkinHash &&
+            !weaponSkinAvailableInSave(*context.save, skinHash)) {
+            return fail(L"Weapon Appearance",
+                        L"that same-character appearance is not marked available in this save. Turn Game Rules OFF to force it.");
+        }
+    }
+
+    for (std::size_t traitSlot = 0U; traitSlot < kWeaponLinkedTraitSlots; ++traitSlot) {
+        const auto imbuedUnit = weaponLinkedTraitUnitId(13U, context.unitId,
+                                                       static_cast<std::uint32_t>(traitSlot));
+        if (weaponRecordElementAvailable(*context.save, 0x06A5U, imbuedUnit)) {
+            std::wstring error;
+            const auto value = parseWeaponHashText(getWindowTextString(context.imbuedTraitEdits[traitSlot]),
+                                                   *context.hashDatabase, error);
+            if (!value) return fail(L"Attached Wrightstone Trait Slot " + numberW(traitSlot + 1U), error);
+            imbuedHashes[traitSlot] = *value;
+        }
+        if (weaponRecordElementAvailable(*context.save, 0x06A6U, imbuedUnit)) {
+            std::wstring error;
+            const auto value = parseWeaponNumberText(
+                getWindowTextString(context.imbuedLevelEdits[traitSlot]), true, error);
+            if (!value) return fail(L"Attached Wrightstone Trait Level " + numberW(traitSlot + 1U), error);
+            imbuedLevels[traitSlot] = *value;
+        }
+    }
+
+    if (weaponRecordElementAvailable(*context.save, 0x0B00U, context.unitId)) {
+        std::wstring error;
+        const auto value = parseWeaponHashText(getWindowTextString(context.wrightstoneEdit),
+                                               *context.hashDatabase, error);
+        if (!value) return fail(L"Wrightstone ID", error);
+        wrightstoneHash = *value;
+    }
+
+
+    if (SendMessageW(context.equipCheck, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+        rule && context.characterGroup != gdtv::kUnknownWeaponCharacterGroup &&
+        rule->characterGroup != context.characterGroup) {
+        return fail(L"Equip Weapon",
+                    L"the edited Weapon ID belongs to a different character. Apply the Weapon ID, close this window, and reopen it under the new character before equipping.");
+    }
+
+    try {
+        for (std::size_t index = 0U; index < kWeaponInfoKeys.size(); ++index) {
+            if (weaponRecordElementAvailable(*context.save, kWeaponInfoKeys[index], context.unitId)) {
+                context.save->setElementBits(kWeaponInfoKeys[index], context.unitId, 0U, infoValues[index]);
+            }
+        }
+        if (weaponRecordElementAvailable(*context.save, kWeaponSkinKey, context.unitId)) {
+            context.save->setElementBits(kWeaponSkinKey, context.unitId, 0U, skinHash);
+        }
+        for (std::size_t slot = 0U; slot < kVisibleWeaponSetupSlots; ++slot) {
+            if (weaponRecordElementAvailable(*context.save, 0x0B02U, context.unitId,
+                                             static_cast<std::uint32_t>(slot))) {
+                context.save->setElementBits(0x0B02U, context.unitId,
+                                             static_cast<std::uint32_t>(slot), setupValues[slot]);
+            }
+        }
+        for (std::size_t traitSlot = 0U; traitSlot < kWeaponLinkedTraitSlots; ++traitSlot) {
+            const auto imbuedUnit = weaponLinkedTraitUnitId(13U, context.unitId,
+                                                           static_cast<std::uint32_t>(traitSlot));
+            if (weaponRecordElementAvailable(*context.save, 0x06A5U, imbuedUnit)) {
+                context.save->setElementBits(0x06A5U, imbuedUnit, 0U, imbuedHashes[traitSlot]);
+            }
+            if (weaponRecordElementAvailable(*context.save, 0x06A6U, imbuedUnit)) {
+                context.save->setElementBits(0x06A6U, imbuedUnit, 0U, imbuedLevels[traitSlot]);
+            }
+        }
+        if (weaponRecordElementAvailable(*context.save, 0x0B00U, context.unitId)) {
+            context.save->setElementBits(0x0B00U, context.unitId, 0U, wrightstoneHash);
+        }
+        if (SendMessageW(context.equipCheck, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+            context.characterGroup != gdtv::kUnknownWeaponCharacterGroup) {
+            const auto characterUnitId = 10000U + context.characterGroup;
+            if (weaponRecordElementAvailable(*context.save, 0x057AU, characterUnitId)) {
+                context.save->setElementBits(0x057AU, characterUnitId, 0U,
+                                             weaponInventorySlot(context.unitId) + 3U);
+            }
+        }
+    } catch (const std::exception& exception) {
+        MessageBoxW(context.window, utf8ToWide(exception.what()).c_str(), L"Weapon MOD",
+                    MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    context.changed = true;
+    refreshWeaponModWindow(context);
+    SetWindowTextW(context.statusLabel,
+        L"Weapon, appearance, setup traits, attached Wrightstone ID, and copied Wrightstone traits were written to memory.");
+    return true;
+}
+
+void chooseWeaponHash(WeaponModDialogContext& context, UINT commandId) {
+    std::optional<std::uint32_t> selected;
+    HWND target{};
+    if (commandId == ID_WEAPON_INFO_HASH) {
+        target = context.weaponInfoEdits[0];
+        auto entries = weaponSaveKeyPickerEntries(*context.hashDatabase);
+        selected = showHashListDialog(context.window, *context.hashDatabase, {},
+                                      L"Weapon Save-Key List", false, &entries);
+    } else if (commandId == ID_WEAPON_SKIN_HASH) {
+        target = context.skinEdit;
+        auto entries = weaponSkinPickerEntries(context, context.gameRulesOn);
+        selected = showHashListDialog(
+            context.window, *context.hashDatabase, {},
+            context.gameRulesOn ? L"Available Character Weapon Appearances"
+                                : L"All Weapon Appearances",
+            false, &entries);
+    } else if (commandId >= ID_WEAPON_SETUP_HASH_BASE &&
+               commandId < ID_WEAPON_SETUP_HASH_BASE + kVisibleWeaponSetupSlots) {
+        const auto slot = static_cast<std::size_t>(commandId - ID_WEAPON_SETUP_HASH_BASE);
+        target = context.setupEdits[slot];
+        if (context.gameRulesOn) {
+            const auto* rule = typedWeaponRule(context);
+            if (rule) {
+                auto entries = weaponRulePickerEntries(*context.hashDatabase,
+                                                       rule->traitGroupHashes[slot]);
+                selected = showHashListDialog(context.window, *context.hashDatabase, {},
+                                              L"Permitted Weapon Setup Traits", false, &entries);
+            }
+        } else {
+            selected = showHashListDialog(context.window, *context.hashDatabase,
+                                          "Trait", L"All Trait Hashes");
+        }
+    } else if (commandId >= ID_WEAPON_IMBUED_HASH_BASE &&
+               commandId < ID_WEAPON_IMBUED_HASH_BASE + kWeaponLinkedTraitSlots) {
+        const auto slot = static_cast<std::size_t>(commandId - ID_WEAPON_IMBUED_HASH_BASE);
+        target = context.imbuedTraitEdits[slot];
+        selected = showHashListDialog(context.window, *context.hashDatabase,
+                                      "Trait", L"Attached Wrightstone Trait Hash List");
+    } else if (commandId == ID_WEAPON_WRIGHTSTONE_HASH) {
+        target = context.wrightstoneEdit;
+        selected = showHashListDialog(context.window, *context.hashDatabase,
+                                      "Wrightstone", L"Wrightstone Hash List");
+    }
+    if (!selected || !target) return;
+    SetWindowTextW(target, hexW(*selected, 8).c_str());
+    if (target == context.weaponInfoEdits[0]) {
+        SetWindowTextW(context.weaponInfoResolved[0],
+                       weaponDefinitionResolution(*context.hashDatabase, *selected).c_str());
+        updateWeaponSetupControlState(context);
+    } else {
+        if (target == context.skinEdit) {
+            SetWindowTextW(context.skinResolved,
+                           weaponSkinResolution(*context.hashDatabase, *selected).c_str());
+            SetWindowTextW(context.skinStateLabel,
+                           (context.gameRulesOn ? weaponSkinStateText(context, *selected)
+                                                : L"Unrestricted").c_str());
+            return;
+        }
+        for (std::size_t index = 0U; index < kVisibleWeaponSetupSlots; ++index) {
+            if (target == context.setupEdits[index]) {
+                SetWindowTextW(context.setupResolved[index],
+                               weaponHashResolution(*context.hashDatabase, *selected).c_str());
+                return;
+            }
+        }
+        for (std::size_t index = 0U; index < kWeaponLinkedTraitSlots; ++index) {
+            if (target == context.imbuedTraitEdits[index]) {
+                SetWindowTextW(context.imbuedResolved[index],
+                               weaponHashResolution(*context.hashDatabase, *selected).c_str());
+                return;
+            }
+        }
+        if (target == context.wrightstoneEdit) {
+            SetWindowTextW(context.wrightstoneResolved,
+                           weaponHashResolution(*context.hashDatabase, *selected).c_str());
+        }
+    }
+}
+
+LRESULT CALLBACK weaponModDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* context = reinterpret_cast<WeaponModDialogContext*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        context = static_cast<WeaponModDialogContext*>(create->lpCreateParams);
+        context->window = hwnd;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(context));
+    }
+    if (!context) return DefWindowProcW(hwnd, message, wParam, lParam);
+
+    switch (message) {
+    case WM_CREATE: {
+        context->font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        context->boldFont = CreateFontW(-18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        context->titleLabel = addDialogControl(hwnd, L"STATIC", L"Weapon MOD", SS_LEFT,
+                                               16, 10, 890, 27, 0, context->boldFont);
+
+        addDialogControl(hwnd, L"BUTTON", L"Weapon Information", BS_GROUPBOX,
+                         12, 38, 906, 126, 0, context->font);
+        addDialogControl(hwnd, L"STATIC", L"Weapon ID", SS_LEFT, 26, 60, 105, 22, 0, context->font);
+        context->weaponInfoEdits[0] = addDialogControl(hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL,
+            132, 56, 180, 26, ID_WEAPON_INFO_EDIT_BASE, context->font, WS_EX_CLIENTEDGE);
+        addDialogControl(hwnd, L"BUTTON", L"Hash List", WS_TABSTOP | BS_PUSHBUTTON,
+                         320, 56, 86, 26, ID_WEAPON_INFO_HASH, context->font);
+        context->weaponInfoResolved[0] = addDialogControl(hwnd, L"STATIC", L"", SS_LEFT,
+                                                          416, 60, 480, 22, 0, context->font);
+        const std::array<const wchar_t*, 3> infoLabels{{L"Experience", L"Level Cap", L"Mirage Munitions"}};
+        for (std::size_t index = 1U; index < 4U; ++index) {
+            const int column = static_cast<int>(index - 1U);
+            const int x = 26 + column * 292;
+            addDialogControl(hwnd, L"STATIC", infoLabels[index - 1U], SS_LEFT,
+                             x, 96, 126, 22, 0, context->font);
+            context->weaponInfoEdits[index] = addDialogControl(
+                hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL,
+                x + 130, 92, 142, 26, ID_WEAPON_INFO_EDIT_BASE + static_cast<UINT>(index),
+                context->font, WS_EX_CLIENTEDGE);
+        }
+        context->equippedLabel = addDialogControl(hwnd, L"STATIC", L"", SS_LEFT,
+                                                   26, 130, 300, 22, 0, context->font);
+        context->equipCheck = addDialogControl(hwnd, L"BUTTON", L"Equip with MOD",
+            WS_TABSTOP | BS_AUTOCHECKBOX, 334, 126, 560, 26, ID_WEAPON_EQUIP_CHECK, context->font);
+
+        addDialogControl(hwnd, L"BUTTON", L"Weapon Appearance / Skin", BS_GROUPBOX,
+                         12, 170, 906, 90, 0, context->font);
+        addDialogControl(hwnd, L"STATIC", L"Skin", SS_LEFT,
+                         28, 194, 60, 22, 0, context->font);
+        context->skinEdit = addDialogControl(
+            hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL,
+            90, 190, 180, 26, ID_WEAPON_SKIN_EDIT, context->font, WS_EX_CLIENTEDGE);
+        context->skinHashButton = addDialogControl(
+            hwnd, L"BUTTON", L"Hash List", WS_TABSTOP | BS_PUSHBUTTON,
+            278, 190, 86, 26, ID_WEAPON_SKIN_HASH, context->font);
+        context->skinResolved = addDialogControl(hwnd, L"STATIC", L"", SS_LEFT,
+                                                  374, 194, 350, 22, 0, context->font);
+        context->skinStateLabel = addDialogControl(hwnd, L"STATIC", L"", SS_LEFT,
+                                                    732, 194, 166, 22, 0, context->font);
+        context->skinSummary = addDialogControl(hwnd, L"STATIC", L"", SS_LEFT,
+                                                 28, 224, 870, 28, 0, context->font);
+
+        addDialogControl(hwnd, L"BUTTON", L"Weapon Setup Traits", BS_GROUPBOX,
+                         12, 266, 906, 230, 0, context->font);
+        context->ruleToggle = addDialogControl(hwnd, L"BUTTON", L"Game Rules: ON",
+            WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE, 26, 289, 150, 28,
+            ID_WEAPON_RULE_TOGGLE, context->font);
+        context->ruleSummary = addDialogControl(hwnd, L"STATIC", L"", SS_LEFT,
+                                                 188, 293, 710, 40, 0, context->font);
+        for (std::size_t slot = 0U; slot < kVisibleWeaponSetupSlots; ++slot) {
+            const int y = 335 + static_cast<int>(slot) * 38;
+            addDialogControl(hwnd, L"STATIC", (L"Slot " + numberW(slot + 1U)).c_str(), SS_LEFT,
+                             28, y + 3, 60, 22, 0, context->font);
+            context->setupEdits[slot] = addDialogControl(
+                hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL,
+                90, y, 180, 26, ID_WEAPON_SETUP_EDIT_BASE + static_cast<UINT>(slot),
+                context->font, WS_EX_CLIENTEDGE);
+            context->setupHashButtons[slot] = addDialogControl(
+                hwnd, L"BUTTON", L"Hash List", WS_TABSTOP | BS_PUSHBUTTON,
+                278, y, 86, 26, ID_WEAPON_SETUP_HASH_BASE + static_cast<UINT>(slot), context->font);
+            context->setupResolved[slot] = addDialogControl(hwnd, L"STATIC", L"", SS_LEFT,
+                                                            374, y + 3, 350, 22, 0, context->font);
+            context->setupStateLabels[slot] = addDialogControl(hwnd, L"STATIC", L"", SS_LEFT,
+                                                               732, y + 3, 166, 22, 0, context->font);
+        }
+
+        addDialogControl(hwnd, L"BUTTON", L"Attached Wrightstone / Copied Traits", BS_GROUPBOX,
+                         12, 502, 906, 196, 0, context->font);
+        addDialogControl(hwnd, L"STATIC", L"Wrightstone ID", SS_LEFT,
+                         28, 526, 120, 22, 0, context->font);
+        context->wrightstoneEdit = addDialogControl(hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL,
+            150, 522, 180, 26, ID_WEAPON_WRIGHTSTONE_EDIT, context->font, WS_EX_CLIENTEDGE);
+        addDialogControl(hwnd, L"BUTTON", L"Hash List", WS_TABSTOP | BS_PUSHBUTTON,
+                         338, 522, 86, 26, ID_WEAPON_WRIGHTSTONE_HASH, context->font);
+        context->wrightstoneResolved = addDialogControl(hwnd, L"STATIC", L"", SS_LEFT,
+                                                         434, 526, 464, 22, 0, context->font);
+        addDialogControl(hwnd, L"STATIC", L"Copied Trait ID", SS_LEFT,
+                         92, 558, 150, 20, 0, context->font);
+        addDialogControl(hwnd, L"STATIC", L"Level", SS_LEFT,
+                         744, 558, 70, 20, 0, context->font);
+        for (std::size_t slot = 0U; slot < kWeaponLinkedTraitSlots; ++slot) {
+            const int y = 582 + static_cast<int>(slot) * 32;
+            addDialogControl(hwnd, L"STATIC", (L"Slot " + numberW(slot + 1U)).c_str(), SS_LEFT,
+                             28, y + 3, 58, 22, 0, context->font);
+            context->imbuedTraitEdits[slot] = addDialogControl(
+                hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, 90, y, 180, 26,
+                ID_WEAPON_IMBUED_EDIT_BASE + static_cast<UINT>(slot), context->font, WS_EX_CLIENTEDGE);
+            addDialogControl(hwnd, L"BUTTON", L"Hash List", WS_TABSTOP | BS_PUSHBUTTON,
+                             278, y, 86, 26, ID_WEAPON_IMBUED_HASH_BASE + static_cast<UINT>(slot), context->font);
+            context->imbuedResolved[slot] = addDialogControl(hwnd, L"STATIC", L"", SS_LEFT,
+                                                             374, y + 3, 350, 22, 0, context->font);
+            context->imbuedLevelEdits[slot] = addDialogControl(
+                hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, 744, y, 92, 26,
+                ID_WEAPON_IMBUED_LEVEL_BASE + static_cast<UINT>(slot), context->font, WS_EX_CLIENTEDGE);
+        }
+
+        context->statusLabel = addDialogControl(hwnd, L"STATIC", L"", SS_LEFT,
+                                                 18, 708, 620, 38, 0, context->font);
+        addDialogControl(hwnd, L"BUTTON", L"MOD", WS_TABSTOP | BS_DEFPUSHBUTTON,
+                         716, 710, 88, 30, ID_WEAPON_APPLY, context->font);
+        addDialogControl(hwnd, L"BUTTON", L"Close", WS_TABSTOP | BS_PUSHBUTTON,
+                         814, 710, 88, 30, IDCANCEL, context->font);
+        refreshWeaponModWindow(*context);
+        return 0;
+    }
+    case WM_COMMAND: {
+        const auto id = LOWORD(wParam);
+        if (id == ID_WEAPON_APPLY) {
+            applyWeaponMod(*context);
+            return 0;
+        }
+        if (id == ID_WEAPON_RULE_TOGGLE) {
+            context->gameRulesOn =
+                SendMessageW(context->ruleToggle, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            updateWeaponSetupControlState(*context);
+            return 0;
+        }
+        if ((id == ID_WEAPON_INFO_EDIT_BASE || id == ID_WEAPON_SKIN_EDIT) &&
+            HIWORD(wParam) == EN_KILLFOCUS) {
+            updateWeaponSetupControlState(*context);
+            if (id == ID_WEAPON_SKIN_EDIT && context->hashDatabase) {
+                std::wstring ignored;
+                const auto parsed = parseWeaponSaveKeyText(
+                    getWindowTextString(context->skinEdit), *context->hashDatabase, ignored);
+                if (parsed) {
+                    SetWindowTextW(context->skinResolved,
+                                   weaponSkinResolution(*context->hashDatabase, *parsed).c_str());
+                }
+            }
+            return 0;
+        }
+        if (id == ID_WEAPON_INFO_HASH || id == ID_WEAPON_SKIN_HASH ||
+            id == ID_WEAPON_WRIGHTSTONE_HASH ||
+            (id >= ID_WEAPON_SETUP_HASH_BASE && id < ID_WEAPON_SETUP_HASH_BASE + kVisibleWeaponSetupSlots) ||
+            (id >= ID_WEAPON_IMBUED_HASH_BASE && id < ID_WEAPON_IMBUED_HASH_BASE + kWeaponLinkedTraitSlots)) {
+            chooseWeaponHash(*context, id);
+            return 0;
+        }
+        if (id == IDCANCEL) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        if (context->font) DeleteObject(context->font);
+        if (context->boldFont) DeleteObject(context->boldFont);
+        context->font = nullptr;
+        context->boldFont = nullptr;
+        context->window = nullptr;
+        if (!context->suppressCloseNotification && context->owner) {
+            PostMessageW(context->owner, WM_APP_WEAPON_MOD_CLOSED,
+                         context->changed ? 1U : 0U, 0);
+        }
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+HWND createWeaponModWindow(HWND owner, WeaponModDialogContext& context) {
+    constexpr wchar_t className[] = L"GBFRToolWeaponModDialog";
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = weaponModDialogProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.lpszClassName = className;
+        registered = RegisterClassExW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    }
+    if (!registered) return nullptr;
+
+    RECT ownerRect{};
+    GetWindowRect(owner, &ownerRect);
+    constexpr int width = 946;
+    constexpr int height = 796;
+    const int x = static_cast<int>(ownerRect.left) +
+                  std::max(0, (static_cast<int>(ownerRect.right - ownerRect.left) - width) / 2);
+    const int y = static_cast<int>(ownerRect.top) +
+                  std::max(0, (static_cast<int>(ownerRect.bottom - ownerRect.top) - height) / 2);
+    context.owner = owner;
+    HWND dialog = CreateWindowExW(WS_EX_TOOLWINDOW, className, L"Weapon MOD",
+                                  WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                                  x, y, width, height, owner, nullptr,
+                                  GetModuleHandleW(nullptr), &context);
+    if (!dialog) return nullptr;
+    ShowWindow(dialog, SW_SHOW);
+    UpdateWindow(dialog);
+    return dialog;
+}
+
+void selectWeaponInModWindow(WeaponModDialogContext& context,
+                             gdtv::SaveData& save,
+                             std::uint32_t unitId,
+                             std::uint32_t characterGroup,
+                             std::wstring characterName) {
+    context.save = &save;
+    context.unitId = unitId;
+    context.characterGroup = characterGroup;
+    context.characterName = std::move(characterName);
+    context.gameRulesOn = true;
+    refreshWeaponModWindow(context);
+}
+
+
+constexpr std::size_t kMaxSharedLogicalFields = 10U;
 
 struct LogicalFamilyModDialogContext {
     HWND owner{};
     HWND window{};
     HWND titleLabel{};
     HWND statusLabel{};
+    HWND attachmentLabel{};
     HFONT font{};
     gdtv::SaveData* save{};
     const gdtv::HashDatabase* hashDatabase{};
@@ -1554,6 +2655,143 @@ constexpr UINT ID_LOGICAL_EDIT_BASE = 4000;
 constexpr UINT ID_LOGICAL_APPLY = 4100;
 constexpr UINT ID_LOGICAL_HASH_BASE = 4200;
 constexpr UINT ID_LOGICAL_REDIRECT_BASE = 4700;
+
+bool nonEmptySaveHash(std::uint32_t hash) noexcept {
+    return hash != 0U && hash != 0xFFFFFFFFU && !gdtv::isGlobalEmptySlotHash(hash);
+}
+
+struct LinkedTraitTriple {
+    std::array<std::uint32_t, 3> ids{};
+    std::array<std::int32_t, 3> levels{};
+
+    bool operator==(const LinkedTraitTriple& other) const noexcept {
+        return ids == other.ids && levels == other.levels;
+    }
+};
+
+std::optional<LinkedTraitTriple> linkedTraitTriple(const gdtv::SaveData& save,
+                                                   std::uint32_t nameSpace,
+                                                   std::uint32_t parentSlot) {
+    LinkedTraitTriple result;
+    for (std::uint32_t traitSlot = 0U; traitSlot < 3U; ++traitSlot) {
+        const auto unitId = nameSpace * 10000000U + parentSlot * 100U + traitSlot;
+        if (!weaponRecordElementAvailable(save, 0x06A5U, unitId) ||
+            !weaponRecordElementAvailable(save, 0x06A6U, unitId)) {
+            return std::nullopt;
+        }
+        result.ids[traitSlot] = static_cast<std::uint32_t>(
+            save.elementBits(0x06A5U, unitId, 0U));
+        result.levels[traitSlot] = bitCopy<std::int32_t>(static_cast<std::uint32_t>(
+            save.elementBits(0x06A6U, unitId, 0U)));
+    }
+    return result;
+}
+
+struct WrightstoneAttachmentSummary {
+    std::size_t identicalInventoryCopies{};
+    std::vector<std::uint32_t> matchingWeaponUnitIds;
+};
+
+WrightstoneAttachmentSummary wrightstoneAttachmentSummary(
+    const gdtv::SaveData& save, std::uint32_t wrightstoneUnitId) {
+    WrightstoneAttachmentSummary result;
+    if (wrightstoneUnitId < 50000U ||
+        !weaponRecordElementAvailable(save, 0x0836U, wrightstoneUnitId)) {
+        return result;
+    }
+    const auto wrightstoneHash = static_cast<std::uint32_t>(
+        save.elementBits(0x0836U, wrightstoneUnitId, 0U));
+    if (!nonEmptySaveHash(wrightstoneHash)) return result;
+    const auto selectedSlot = wrightstoneUnitId - 50000U;
+    const auto selectedTraits = linkedTraitTriple(save, 14U, selectedSlot);
+    if (!selectedTraits) return result;
+
+    if (const auto* inventory = save.findGroup(0x0836U)) {
+        for (const auto& record : inventory->records) {
+            if (record.index < 50000U ||
+                !weaponRecordElementAvailable(save, 0x0836U, record.index)) {
+                continue;
+            }
+            const auto candidateHash = static_cast<std::uint32_t>(
+                save.elementBits(0x0836U, record.index, 0U));
+            if (candidateHash != wrightstoneHash) continue;
+            const auto candidateTraits = linkedTraitTriple(save, 14U, record.index - 50000U);
+            if (candidateTraits && *candidateTraits == *selectedTraits) {
+                ++result.identicalInventoryCopies;
+            }
+        }
+    }
+
+    if (const auto* weaponWrightstones = save.findGroup(0x0B00U)) {
+        for (const auto& record : weaponWrightstones->records) {
+            if (record.index < 40000U ||
+                !weaponRecordElementAvailable(save, 0x0B00U, record.index)) {
+                continue;
+            }
+            const auto attachedHash = static_cast<std::uint32_t>(
+                save.elementBits(0x0B00U, record.index, 0U));
+            if (attachedHash != wrightstoneHash) continue;
+            const auto weaponTraits = linkedTraitTriple(save, 13U, record.index - 40000U);
+            if (weaponTraits && *weaponTraits == *selectedTraits) {
+                result.matchingWeaponUnitIds.push_back(record.index);
+            }
+        }
+    }
+    return result;
+}
+
+std::wstring matchingWeaponLabel(const gdtv::SaveData& save,
+                                 const gdtv::HashDatabase& database,
+                                 std::uint32_t weaponUnitId) {
+    const auto slot = weaponUnitId >= 40000U ? weaponUnitId - 40000U : weaponUnitId;
+    std::wstring name = L"Weapon";
+    if (weaponRecordElementAvailable(save, 0x0AF3U, weaponUnitId)) {
+        const auto saveHash = static_cast<std::uint32_t>(
+            save.elementBits(0x0AF3U, weaponUnitId, 0U));
+        const auto databaseHash = gdtv::weaponDatabaseHashForSaveHash(saveHash);
+        const auto resolved = gdtv::logicalHashDisplayName(database, databaseHash);
+        if (!resolved.empty()) name = utf8ToWide(resolved);
+    }
+    return name + L" (Slot " + numberW(slot) + L")";
+}
+
+std::wstring wrightstoneAttachmentText(const LogicalFamilyModDialogContext& context) {
+    if (!context.save || !context.hashDatabase || !context.family ||
+        context.family->anchorKey != gdtv::wrightstonesFamily().anchorKey) {
+        return {};
+    }
+    const auto summary = wrightstoneAttachmentSummary(*context.save, context.unitId);
+    if (summary.matchingWeaponUnitIds.empty()) {
+        return L"Not attached: no weapon has the same Wrightstone ID and copied three-trait set.";
+    }
+    if (summary.identicalInventoryCopies == 1U &&
+        summary.matchingWeaponUnitIds.size() == 1U) {
+        return L"Attached to " + matchingWeaponLabel(
+            *context.save, *context.hashDatabase, summary.matchingWeaponUnitIds.front()) + L".";
+    }
+    std::wstring result = L"Possible attachment match: " +
+        numberW(summary.identicalInventoryCopies) + L" identical inventory copies and " +
+        numberW(summary.matchingWeaponUnitIds.size()) + L" matching weapons";
+    const auto displayCount = std::min<std::size_t>(summary.matchingWeaponUnitIds.size(), 3U);
+    if (displayCount != 0U) {
+        result += L" (";
+        for (std::size_t index = 0U; index < displayCount; ++index) {
+            if (index != 0U) result += L", ";
+            result += matchingWeaponLabel(*context.save, *context.hashDatabase,
+                                          summary.matchingWeaponUnitIds[index]);
+        }
+        if (summary.matchingWeaponUnitIds.size() > displayCount) result += L", ...";
+        result += L")";
+    }
+    result += L". The save does not identify which identical inventory copy was used.";
+    return result;
+}
+
+void refreshWrightstoneAttachmentLabel(LogicalFamilyModDialogContext& context) {
+    if (context.attachmentLabel) {
+        SetWindowTextW(context.attachmentLabel, wrightstoneAttachmentText(context).c_str());
+    }
+}
 
 std::wstring specialCurrencyNameW(const gdtv::SpecialCurrencyDefinition& currency) {
     auto result = utf8ToWide(std::string(currency.name));
@@ -1635,6 +2873,32 @@ std::wstring logicalFamilyWindowTitle(const LogicalFamilyModDialogContext& conte
             return L"Curios - Slot " + numberW(address.slot + 1U) + L" / Reward Entry " +
                    numberW(address.position) + L"  -  MOD";
         }
+    }
+    if (context.family->anchorKey == gdtv::wrightstonesFamily().anchorKey) {
+        std::wstring title;
+        if (context.save && context.hashDatabase && context.family->fieldCount != 0U &&
+            gdtv::logicalFieldAvailable(*context.save, context.family->fields[0], context.unitId)) {
+            const auto hash = static_cast<std::uint32_t>(context.save->elementBits(
+                context.family->fields[0].key, context.unitId,
+                context.family->fields[0].elementIndex));
+            title = utf8ToWide(gdtv::logicalHashDisplayName(*context.hashDatabase, hash));
+        }
+        if (title.empty()) title = L"Wrightstone";
+        const auto slot = context.unitId >= 50000U ? context.unitId - 50000U : context.unitId;
+        return title + L" - Wrightstone Slot " + numberW(slot) + L"  -  MOD";
+    }
+    if (context.family->anchorKey == gdtv::currentSigilsFamily().anchorKey) {
+        std::wstring title;
+        if (context.save && context.hashDatabase && context.family->fieldCount != 0U &&
+            gdtv::logicalFieldAvailable(*context.save, context.family->fields[0], context.unitId)) {
+            const auto hash = static_cast<std::uint32_t>(context.save->elementBits(
+                context.family->fields[0].key, context.unitId,
+                context.family->fields[0].elementIndex));
+            title = utf8ToWide(gdtv::logicalHashDisplayName(*context.hashDatabase, hash));
+        }
+        if (title.empty()) title = L"Current Sigil";
+        const auto slot = context.unitId >= 30000U ? context.unitId - 30000U : context.unitId;
+        return title + L" - Sigil Slot " + numberW(slot) + L"  -  MOD";
     }
     return utf8ToWide(std::string(context.family->name)) + L" - " +
            logicalUnitSummaryW(*context.family, context.unitId) + L"  -  MOD";
@@ -1752,6 +3016,7 @@ void selectLogicalFamilyEntryInModWindow(LogicalFamilyModDialogContext& context,
             refreshLogicalFamilyRow(context, index);
         }
     }
+    refreshWrightstoneAttachmentLabel(context);
     if (context.statusLabel) {
         SetWindowTextW(context.statusLabel,
                        L"Values are edited in memory until Save Edited ... As is used.");
@@ -1830,6 +3095,7 @@ bool applyLogicalFamilyAll(LogicalFamilyModDialogContext& context) {
         for (std::size_t fieldIndex = 0; fieldIndex < context.family->fieldCount; ++fieldIndex) {
             refreshLogicalFamilyRow(context, fieldIndex);
         }
+        refreshWrightstoneAttachmentLabel(context);
         SetWindowTextW(
             context.statusLabel,
             curioEdit
@@ -1865,9 +3131,37 @@ LRESULT CALLBACK logicalFamilyModDialogProc(HWND hwnd, UINT message, WPARAM wPar
         context->titleLabel = addDialogControl(hwnd, L"STATIC", title.c_str(), SS_LEFT,
                                                16, 14, 700, 28, 0, context->font);
 
+        const bool sigilWindow = context->family->anchorKey ==
+            gdtv::currentSigilsFamily().anchorKey;
+        const bool wrightstoneWindow = context->family->anchorKey ==
+            gdtv::wrightstonesFamily().anchorKey;
+        if (sigilWindow) {
+            addDialogControl(hwnd, L"STATIC", L"SIGIL INFORMATION", SS_LEFT,
+                             18, 48, 700, 22, 0, context->font);
+            addDialogControl(hwnd, L"STATIC", L"LINKED TRAITS", SS_LEFT,
+                             18, 286, 700, 22, 0, context->font);
+        } else if (wrightstoneWindow) {
+            addDialogControl(hwnd, L"STATIC", L"WRIGHTSTONE INFORMATION", SS_LEFT,
+                             18, 48, 700, 22, 0, context->font);
+            addDialogControl(hwnd, L"STATIC", L"ATTACHMENT STATUS", SS_LEFT,
+                             18, 340, 700, 22, 0, context->font);
+            context->attachmentLabel = addDialogControl(
+                hwnd, L"STATIC", L"", SS_LEFT, 18, 366, 700, 62, 0, context->font);
+            addDialogControl(hwnd, L"STATIC", L"LINKED TRAITS", SS_LEFT,
+                             18, 434, 700, 22, 0, context->font);
+        }
+
         for (std::size_t index = 0; index < context->family->fieldCount; ++index) {
             const auto& field = context->family->fields[index];
-            const int y = 52 + static_cast<int>(index) * 72;
+            const int y = sigilWindow
+                ? (index < 3U
+                    ? 76 + static_cast<int>(index) * 72
+                    : 316 + static_cast<int>(index - 3U) * 72)
+                : (wrightstoneWindow
+                    ? (index < 4U
+                        ? 76 + static_cast<int>(index) * 66
+                        : 462 + static_cast<int>(index - 4U) * 62)
+                    : 52 + static_cast<int>(index) * 72);
             const auto label = legacyLocatorW(field.key) + L" - " +
                                utf8ToWide(std::string(field.label));
             addDialogControl(hwnd, L"STATIC", label.c_str(), SS_LEFT,
@@ -1893,14 +3187,24 @@ LRESULT CALLBACK logicalFamilyModDialogProc(HWND hwnd, UINT message, WPARAM wPar
             refreshLogicalFamilyRow(*context, index);
         }
 
-        const int statusY = 62 + static_cast<int>(context->family->fieldCount) * 72;
+        const int statusY = sigilWindow
+            ? 612
+            : (wrightstoneWindow
+                ? 840
+                : 62 + static_cast<int>(context->family->fieldCount) * 72);
         context->statusLabel = addDialogControl(
-            hwnd, L"STATIC", L"Press MOD to write every editable value shown above to memory.",
-            SS_LEFT, 18, statusY, 460, 38, 0, context->font);
+            hwnd, L"STATIC",
+            sigilWindow
+                ? L"Press MOD to write the sigil and both linked trait slots to memory."
+                : (wrightstoneWindow
+                    ? L"Press MOD to write the Wrightstone parent and all three linked trait slots to memory."
+                    : L"Press MOD to write every editable value shown above to memory."),
+            SS_LEFT, 18, statusY, 500, 38, 0, context->font);
         addDialogControl(hwnd, L"BUTTON", L"MOD", WS_TABSTOP | BS_DEFPUSHBUTTON,
                          532, statusY + 6, 88, 30, ID_LOGICAL_APPLY, context->font);
         addDialogControl(hwnd, L"BUTTON", L"Close", WS_TABSTOP | BS_PUSHBUTTON,
                          630, statusY + 6, 88, 30, IDCANCEL, context->font);
+        refreshWrightstoneAttachmentLabel(*context);
         return 0;
     }
     case WM_COMMAND: {
@@ -1991,7 +3295,15 @@ HWND createLogicalFamilyModWindow(HWND owner, LogicalFamilyModDialogContext& con
     RECT ownerRect{};
     GetWindowRect(owner, &ownerRect);
     constexpr int width = 760;
-    const int height = 170 + static_cast<int>(context.family->fieldCount) * 72;
+    const bool sigilWindow = context.family->anchorKey ==
+        gdtv::currentSigilsFamily().anchorKey;
+    const bool wrightstoneWindow = context.family->anchorKey ==
+        gdtv::wrightstonesFamily().anchorKey;
+    const int height = sigilWindow
+        ? 710
+        : (wrightstoneWindow
+            ? 930
+            : 170 + static_cast<int>(context.family->fieldCount) * 72);
     const int x = static_cast<int>(ownerRect.left) +
                   std::max(0, (static_cast<int>(ownerRect.right - ownerRect.left) - width) / 2);
     const int y = static_cast<int>(ownerRect.top) +
@@ -2705,6 +4017,7 @@ private:
     HWND summonModWindow_{};
     HWND masteryModWindow_{};
     HWND logicalModWindow_{};
+    HWND weaponModWindow_{};
     HWND bulkModWindow_{};
     HWND sectionSearchWindow_{};
     HFONT uiFont_{};
@@ -2715,6 +4028,7 @@ private:
     std::unique_ptr<SummonSlotModDialogContext> summonModContext_;
     std::unique_ptr<MasteryTreeModDialogContext> masteryModContext_;
     std::unique_ptr<LogicalFamilyModDialogContext> logicalModContext_;
+    std::unique_ptr<WeaponModDialogContext> weaponModContext_;
     std::unique_ptr<BulkLogicalModDialogContext> bulkModContext_;
     std::unique_ptr<SectionSearchDialogContext> sectionSearchContext_;
     gdtv::SectionMap sectionMap_;
@@ -2798,6 +4112,16 @@ private:
             }
             return 0;
         }
+        case WM_APP_WEAPON_MOD_CLOSED: {
+            const bool changed = wParam != 0U;
+            weaponModWindow_ = nullptr;
+            weaponModContext_.reset();
+            if (changed) {
+                rebuildTree();
+                setStatus(L"Weapon edits are in memory - use File > Save Edited ... As");
+            }
+            return 0;
+        }
         case WM_APP_BULK_MOD_CLOSED: {
             const bool changed = wParam != 0U;
             bulkModWindow_ = nullptr;
@@ -2824,6 +4148,7 @@ private:
             closeSummonModWindow();
             closeMasteryModWindow();
             closeLogicalModWindow();
+            closeWeaponModWindow();
             closeBulkModWindow();
             closeSectionSearchWindow();
             DragAcceptFiles(hwnd_, FALSE);
@@ -3503,6 +4828,17 @@ private:
         if (logicalModContext_ && logicalModContext_->save == save) closeLogicalModWindow();
     }
 
+    void closeWeaponModWindow() {
+        if (weaponModContext_) weaponModContext_->suppressCloseNotification = true;
+        if (weaponModWindow_ && IsWindow(weaponModWindow_)) DestroyWindow(weaponModWindow_);
+        weaponModWindow_ = nullptr;
+        weaponModContext_.reset();
+    }
+
+    void closeWeaponModWindowForSave(const gdtv::SaveData* save) {
+        if (weaponModContext_ && weaponModContext_->save == save) closeWeaponModWindow();
+    }
+
     void closeBulkModWindow() {
         if (bulkModContext_) bulkModContext_->suppressCloseNotification = true;
         if (bulkModWindow_ && IsWindow(bulkModWindow_)) DestroyWindow(bulkModWindow_);
@@ -3533,6 +4869,7 @@ private:
             closeSummonModWindowForSave(role == Role::Primary ? primary_.get() : compare_.get());
             closeMasteryModWindowForSave(role == Role::Primary ? primary_.get() : compare_.get());
             closeLogicalModWindowForSave(role == Role::Primary ? primary_.get() : compare_.get());
+            closeWeaponModWindowForSave(role == Role::Primary ? primary_.get() : compare_.get());
             closeBulkModWindowForSave(role == Role::Primary ? primary_.get() : compare_.get());
             closeSectionSearchWindow();
             if (role == Role::Primary) primary_ = std::move(parsed);
@@ -4038,6 +5375,24 @@ private:
                 }
                 label += numberW(slots.size()) + L" slots, " +
                          numberW(anchor->records.size()) + L" entries";
+            } else if (family->anchorKey == gdtv::weaponsFamily().anchorKey) {
+                std::size_t ownedWeapons = 0U;
+                for (const auto& record : anchor->records) {
+                    if (!weaponRecordElementAvailable(*data.save, 0x0AF3U, record.index)) continue;
+                    const auto weaponHash = static_cast<std::uint32_t>(
+                        data.save->elementBits(0x0AF3U, record.index, 0U));
+                    if (nonEmptySaveHash(weaponHash)) ++ownedWeapons;
+                }
+                label += numberW(ownedWeapons) + L" owned weapons";
+            } else if (family->anchorKey == gdtv::wrightstonesFamily().anchorKey) {
+                std::size_t occupied = 0U;
+                for (const auto& record : anchor->records) {
+                    if (!weaponRecordElementAvailable(*data.save, 0x0836U, record.index)) continue;
+                    const auto hash = static_cast<std::uint32_t>(
+                        data.save->elementBits(0x0836U, record.index, 0U));
+                    if (nonEmptySaveHash(hash)) ++occupied;
+                }
+                label += numberW(occupied) + L" occupied Wrightstones";
             } else {
                 label += numberW(anchor->records.size()) + L" entries";
             }
@@ -4069,6 +5424,37 @@ private:
         const auto* anchor = data.save->findGroup(family->anchorKey);
         if (!anchor) return;
 
+        if (family->anchorKey == gdtv::weaponsFamily().anchorKey) {
+            std::map<std::uint32_t, std::size_t> characterCounts;
+            for (const auto& record : anchor->records) {
+                std::uint32_t characterGroup = gdtv::kUnknownWeaponCharacterGroup;
+                if (weaponRecordElementAvailable(*data.save, 0x0AF3U, record.index)) {
+                    const auto weaponHash = static_cast<std::uint32_t>(
+                        data.save->elementBits(0x0AF3U, record.index, 0U));
+                    if (weaponHash == 0U || weaponHash == 0xFFFFFFFFU ||
+                        gdtv::isGlobalEmptySlotHash(weaponHash)) {
+                        continue;
+                    }
+                    if (const auto* rule = gdtv::weaponRuleForHash(weaponHash)) {
+                        characterGroup = rule->characterGroup;
+                    }
+                }
+                ++characterCounts[characterGroup];
+            }
+            for (const auto& [characterGroup, count] : characterCounts) {
+                NodeData characterData{NodeKind::LogicalCharacter, data.role, data.save};
+                characterData.key = family->anchorKey;
+                characterData.logicalFamilyAnchor = family->anchorKey;
+                characterData.characterGroup = characterGroup;
+                const auto name = characterGroup == gdtv::kUnknownWeaponCharacterGroup
+                    ? L"Unmapped / Other Weapons" : characterSectionLabel(characterGroup);
+                const auto label = name + L" (" + numberW(count) + L" weapons)";
+                const auto characterItem = addItem(item, label, characterData, true);
+                addDummy(characterItem);
+            }
+            return;
+        }
+
         if (family->grouping == gdtv::LogicalGroupingKind::CurrentTraitsCharacter ||
             family->grouping == gdtv::LogicalGroupingKind::OverMasteryCharacter) {
             std::map<std::uint32_t, std::size_t> characterCounts;
@@ -4085,6 +5471,49 @@ private:
                                    numberW(count) + L" entries)";
                 const auto characterItem = addItem(item, label, characterData, true);
                 addDummy(characterItem);
+            }
+            return;
+        }
+
+        if (family->anchorKey == gdtv::wrightstonesFamily().anchorKey) {
+            struct WrightstonePage {
+                std::size_t firstOrdinal{};
+                std::size_t lastOrdinal{};
+                std::size_t count{};
+                std::uint32_t firstSlot{};
+                std::uint32_t lastSlot{};
+                bool initialized{};
+            };
+            std::map<std::uint32_t, WrightstonePage> pages;
+            for (std::size_t ordinal = 0U; ordinal < anchor->records.size(); ++ordinal) {
+                const auto unitId = anchor->records[ordinal].index;
+                if (unitId < 50000U ||
+                    !weaponRecordElementAvailable(*data.save, 0x0836U, unitId)) continue;
+                const auto hash = static_cast<std::uint32_t>(
+                    data.save->elementBits(0x0836U, unitId, 0U));
+                if (!nonEmptySaveHash(hash)) continue;
+                const auto slot = unitId - 50000U;
+                auto& page = pages[slot / 100U];
+                if (!page.initialized) {
+                    page.firstOrdinal = ordinal;
+                    page.firstSlot = slot;
+                    page.initialized = true;
+                }
+                page.lastOrdinal = ordinal + 1U;
+                page.lastSlot = slot;
+                ++page.count;
+            }
+            for (const auto& [pageIndex, page] : pages) {
+                (void)pageIndex;
+                NodeData pageData{NodeKind::LogicalPage, data.role, data.save};
+                pageData.key = family->anchorKey;
+                pageData.logicalFamilyAnchor = family->anchorKey;
+                pageData.start = page.firstOrdinal;
+                pageData.end = page.lastOrdinal;
+                const auto label = L"Slots " + numberW(page.firstSlot) + L"-" +
+                    numberW(page.lastSlot) + L" (" + numberW(page.count) + L" occupied)";
+                const auto pageItem = addItem(item, label, pageData, true);
+                addDummy(pageItem);
             }
             return;
         }
@@ -4131,6 +5560,46 @@ private:
         if (!family) return;
         const auto* anchor = data.save->findGroup(family->anchorKey);
         if (!anchor) return;
+
+        if (family->anchorKey == gdtv::weaponsFamily().anchorKey) {
+            for (std::size_t ordinal = 0U; ordinal < anchor->records.size(); ++ordinal) {
+                const auto unitId = anchor->records[ordinal].index;
+                if (!weaponRecordElementAvailable(*data.save, 0x0AF3U, unitId)) continue;
+                const auto weaponHash = static_cast<std::uint32_t>(
+                    data.save->elementBits(0x0AF3U, unitId, 0U));
+                if (weaponHash == 0U || weaponHash == 0xFFFFFFFFU ||
+                    gdtv::isGlobalEmptySlotHash(weaponHash)) {
+                    continue;
+                }
+                const auto* rule = gdtv::weaponRuleForHash(weaponHash);
+                const auto characterGroup = rule ? static_cast<std::uint32_t>(rule->characterGroup)
+                                                 : static_cast<std::uint32_t>(gdtv::kUnknownWeaponCharacterGroup);
+                if (characterGroup != data.characterGroup) continue;
+
+                NodeData slotData{NodeKind::LogicalSlot, data.role, data.save};
+                slotData.key = family->anchorKey;
+                slotData.logicalFamilyAnchor = family->anchorKey;
+                slotData.recordOrdinal = ordinal;
+                slotData.unitId = unitId;
+                slotData.characterGroup = characterGroup;
+                const auto displayHash = gdtv::weaponDatabaseHashForSaveHash(weaponHash);
+                auto name = utf8ToWide(gdtv::logicalHashDisplayName(hashDatabase_, displayHash));
+                if (name.empty()) name = L"Weapon 0x" + hexW(displayHash, 8);
+                auto label = name + L" - Slot " + numberW(weaponInventorySlot(unitId));
+
+                if (characterGroup != gdtv::kUnknownWeaponCharacterGroup) {
+                    const auto characterUnitId = 10000U + characterGroup;
+                    if (weaponRecordElementAvailable(*data.save, 0x057AU, characterUnitId) &&
+                        static_cast<std::uint32_t>(data.save->elementBits(0x057AU, characterUnitId, 0U)) ==
+                            weaponInventorySlot(unitId) + 3U) {
+                        label += L" [Equipped]";
+                    }
+                }
+                const auto slotItem = addItem(item, label, slotData, true);
+                addDummy(slotItem);
+            }
+            return;
+        }
 
         if (family->grouping == gdtv::LogicalGroupingKind::OverMasteryCharacter) {
             for (std::size_t ordinal = 0; ordinal < anchor->records.size(); ++ordinal) {
@@ -4208,6 +5677,13 @@ private:
         const auto endOrdinal = std::min(data.end, anchor->records.size());
         for (std::size_t ordinal = data.start; ordinal < endOrdinal; ++ordinal) {
             const auto unitId = anchor->records[ordinal].index;
+            if (family->anchorKey == gdtv::wrightstonesFamily().anchorKey) {
+                if (unitId < 50000U ||
+                    !weaponRecordElementAvailable(*data.save, 0x0836U, unitId)) continue;
+                const auto hash = static_cast<std::uint32_t>(
+                    data.save->elementBits(0x0836U, unitId, 0U));
+                if (!nonEmptySaveHash(hash)) continue;
+            }
             const auto address = gdtv::decodeLogicalUnitId(*family, unitId);
             if (family->grouping == gdtv::LogicalGroupingKind::CurrentTraitsCharacter &&
                 (!address.valid || address.characterGroup != data.characterGroup ||
@@ -4237,11 +5713,33 @@ private:
             } else if (family->anchorKey == gdtv::summonInventoryFamily().anchorKey) {
                 label = summonSlotLabel(*data.save, unitId);
             } else {
-                label = utf8ToWide(std::string(family->slotLabel)) + L" " + numberW(unitId);
+                if (family->anchorKey == gdtv::currentSigilsFamily().anchorKey && unitId >= 30000U) {
+                    label = utf8ToWide(std::string(family->slotLabel)) + L" " +
+                            numberW(unitId - 30000U);
+                } else if (family->anchorKey == gdtv::wrightstonesFamily().anchorKey &&
+                           unitId >= 50000U) {
+                    label = utf8ToWide(std::string(family->slotLabel)) + L" " +
+                            numberW(unitId - 50000U);
+                } else {
+                    label = utf8ToWide(std::string(family->slotLabel)) + L" " + numberW(unitId);
+                }
                 if (family->fieldCount > 0U &&
                     family->fields[0].kind == gdtv::LogicalValueKind::Hash) {
                     const auto name = logicalHashName(*data.save, family->fields[0], unitId);
                     if (!name.empty()) label += L" - " + name;
+                }
+                if (family->anchorKey == gdtv::wrightstonesFamily().anchorKey) {
+                    if (weaponRecordElementAvailable(*data.save, 0x0838U, unitId) &&
+                        data.save->elementBits(0x0838U, unitId, 0U) != 0U) {
+                        label += L" [Locked]";
+                    }
+                    const auto attachment = wrightstoneAttachmentSummary(*data.save, unitId);
+                    if (attachment.identicalInventoryCopies == 1U &&
+                        attachment.matchingWeaponUnitIds.size() == 1U) {
+                        label += L" [Attached]";
+                    } else if (!attachment.matchingWeaponUnitIds.empty()) {
+                        label += L" [Possible Attached]";
+                    }
                 }
             }
             const auto slot = addItem(item, label, slotData, true);
@@ -4930,6 +6428,16 @@ private:
         if (searchScopeAnchor(*scope) != family.anchorKey) return false;
         const auto address = gdtv::decodeLogicalUnitId(family, unitId);
         if (scope->kind == NodeKind::LogicalCharacter) {
+            if (family.anchorKey == gdtv::weaponsFamily().anchorKey && scope->save &&
+                weaponRecordElementAvailable(*scope->save, 0x0AF3U, unitId)) {
+                const auto weaponHash = static_cast<std::uint32_t>(
+                    scope->save->elementBits(0x0AF3U, unitId, 0U));
+                if (emptyLogicalIdentifier(weaponHash)) return false;
+                const auto* rule = gdtv::weaponRuleForHash(weaponHash);
+                const auto characterGroup = rule ? static_cast<std::uint32_t>(rule->characterGroup)
+                                                 : static_cast<std::uint32_t>(gdtv::kUnknownWeaponCharacterGroup);
+                return characterGroup == scope->characterGroup;
+            }
             return address.valid && address.characterScoped &&
                    address.characterGroup == scope->characterGroup;
         }
@@ -4995,9 +6503,18 @@ private:
                         if (field.kind != gdtv::LogicalValueKind::Hash) continue;
 
                         const auto hash = static_cast<std::uint32_t>(bits);
-                        const auto* entries = hashDatabase_.find(hash);
+                        auto lookupHash = hash;
+                        std::wstring rowPrefix;
+                        if (family->anchorKey == gdtv::weaponsFamily().anchorKey &&
+                            field.key == 0x0AF3U) {
+                            if (const auto* weaponRule = gdtv::weaponRuleForHash(hash)) {
+                                lookupHash = gdtv::weaponDatabaseHash(*weaponRule);
+                                rowPrefix = L"Save key " + hexW(hash, 8) + L" | ";
+                            }
+                        }
+                        const auto* entries = hashDatabase_.find(lookupHash);
                         if (!entries || entries->empty()) {
-                            const auto row = hashSearchRow(hash, nullptr);
+                            const auto row = rowPrefix + hashSearchRow(lookupHash, nullptr);
                             if (preferredRow.empty()) preferredRow = row;
                             if (containsQuery(wideToUtf8(row))) {
                                 matched = true;
@@ -5006,7 +6523,7 @@ private:
                             continue;
                         }
                         for (const auto& entry : *entries) {
-                            const auto row = hashSearchRow(hash, &entry);
+                            const auto row = rowPrefix + hashSearchRow(lookupHash, &entry);
                             if (preferredRow.empty()) preferredRow = row;
                             if (containsQuery(wideToUtf8(row))) {
                                 matched = true;
@@ -5639,13 +7156,15 @@ private:
             if (family->anchorKey == gdtv::summonInventoryFamily().anchorKey ||
                 family->anchorKey == gdtv::itemsFamily().anchorKey ||
                 family->anchorKey == gdtv::weaponsFamily().anchorKey ||
+                family->anchorKey == gdtv::wrightstonesFamily().anchorKey ||
                 family->anchorKey == gdtv::currentSigilsFamily().anchorKey) {
                 return family;
             }
             return nullptr;
         }
         if (family->anchorKey == gdtv::currentTraitsFamily().anchorKey ||
-            family->anchorKey == gdtv::overMasteryFamily().anchorKey) {
+            family->anchorKey == gdtv::overMasteryFamily().anchorKey ||
+            family->anchorKey == gdtv::weaponsFamily().anchorKey) {
             return family;
         }
         return nullptr;
@@ -5662,8 +7181,17 @@ private:
             const auto unitId = record.index;
             const auto address = gdtv::decodeLogicalUnitId(family, unitId);
             if (data.kind == NodeKind::LogicalCharacter) {
-                if (!address.valid || !address.characterScoped ||
-                    address.characterGroup != data.characterGroup) {
+                if (family.anchorKey == gdtv::weaponsFamily().anchorKey) {
+                    if (!weaponRecordElementAvailable(*data.save, 0x0AF3U, unitId)) continue;
+                    const auto weaponHash = static_cast<std::uint32_t>(
+                        data.save->elementBits(0x0AF3U, unitId, 0U));
+                    if (emptyLogicalIdentifier(weaponHash)) continue;
+                    const auto* rule = gdtv::weaponRuleForHash(weaponHash);
+                    const auto characterGroup = rule ? static_cast<std::uint32_t>(rule->characterGroup)
+                                                     : static_cast<std::uint32_t>(gdtv::kUnknownWeaponCharacterGroup);
+                    if (characterGroup != data.characterGroup) continue;
+                } else if (!address.valid || !address.characterScoped ||
+                           address.characterGroup != data.characterGroup) {
                     continue;
                 }
             } else if (data.kind == NodeKind::MasteryCharacter) {
@@ -5877,9 +7405,55 @@ private:
         if (!family) return;
         if (family->anchorKey == gdtv::summonInventoryFamily().anchorKey) {
             openSummonSlotModWindow(data);
+        } else if (family->anchorKey == gdtv::weaponsFamily().anchorKey) {
+            openWeaponModWindow(data);
         } else {
             openSharedLogicalFamilyModWindow(data, *family);
         }
+    }
+
+    void openWeaponModWindow(const NodeData& data) {
+        if (!data.save || data.kind != NodeKind::LogicalSlot) return;
+        std::uint32_t characterGroup = data.characterGroup;
+        if (weaponRecordElementAvailable(*data.save, 0x0AF3U, data.unitId)) {
+            const auto hash = static_cast<std::uint32_t>(
+                data.save->elementBits(0x0AF3U, data.unitId, 0U));
+            if (const auto* rule = gdtv::weaponRuleForHash(hash)) {
+                // The derived definition is authoritative, including real character group 0.
+                characterGroup = rule->characterGroup;
+            }
+        }
+        std::wstring characterName;
+        if (characterGroup != gdtv::kUnknownWeaponCharacterGroup) {
+            if (const auto* entry = characterSections_.find(characterGroup); entry &&
+                !entry->inGameName.empty()) {
+                characterName = utf8ToWide(entry->inGameName);
+            } else {
+                characterName = characterSectionLabel(characterGroup);
+            }
+        }
+
+        if (weaponModContext_ && weaponModWindow_ && IsWindow(weaponModWindow_)) {
+            selectWeaponInModWindow(*weaponModContext_, *data.save, data.unitId,
+                                    characterGroup, std::move(characterName));
+        } else {
+            weaponModContext_ = std::make_unique<WeaponModDialogContext>();
+            weaponModContext_->save = data.save;
+            weaponModContext_->hashDatabase = &hashDatabase_;
+            weaponModContext_->unitId = data.unitId;
+            weaponModContext_->characterGroup = characterGroup;
+            weaponModContext_->characterName = std::move(characterName);
+            weaponModWindow_ = createWeaponModWindow(hwnd_, *weaponModContext_);
+            if (!weaponModWindow_) {
+                weaponModContext_.reset();
+                showError(hwnd_, L"Could not open the Weapon MOD window.");
+                return;
+            }
+        }
+
+        const auto roleName = data.role == Role::Primary ? L"Primary" : L"Comparison";
+        setStatus(std::wstring(roleName) + L" weapon slot " +
+                  numberW(weaponInventorySlot(data.unitId)) + L" is open in the MOD window");
     }
 
     void openSharedLogicalFamilyModWindow(const NodeData& data,

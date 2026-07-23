@@ -5,6 +5,7 @@
 #include "LogicalFamilies.hpp"
 #include "SectionNames.hpp"
 #include "ValueDecoder.hpp"
+#include "WeaponRules.hpp"
 
 #include <array>
 #include <cstdint>
@@ -159,8 +160,9 @@ int main() {
     const auto& sharedFamilies = sharedLogicalFamilies();
     expect(sharedFamilies.size() == 9U, "shared logical family count");
     expect(sharedFamilies[0] == &quickValuesFamily() && sharedFamilies[1] == &summonFamily &&
-           sharedFamilies[2] == &currentTraits && sharedFamilies[3] == &overMastery &&
-           sharedFamilies[4] == &items && sharedFamilies[5] == &weaponsFamily() &&
+           sharedFamilies[2] == &overMastery && sharedFamilies[3] == &items &&
+           sharedFamilies[4] == &weaponsFamily() &&
+           sharedFamilies[5] == &wrightstonesFamily() &&
            sharedFamilies[6] == &currentSigilsFamily() &&
            sharedFamilies[7] == &acquiredSigilsFamily() && sharedFamilies[8] == &curiosFamily(),
            "shared logical family order");
@@ -172,20 +174,115 @@ int main() {
            "items anchor lookup");
 
     const auto& weapons = weaponsFamily();
-    expect(weapons.anchorKey == 0x0AF3U && weapons.fieldCount == 5U,
+    expect(weapons.anchorKey == 0x0AF3U && weapons.fieldCount == 6U,
            "weapons family definition");
     expect(weapons.fields[0].hashCategoryFilter == "Weapons",
            "weapon ID field filter");
-    expect(weapons.fields[4].key == 0x0B00U &&
+    expect(weapons.fields[4].key == 0x0AFEU &&
            weapons.fields[4].kind == LogicalValueKind::Hash,
+           "weapon appearance field");
+    expect(weapons.fields[5].key == 0x0B00U &&
+           weapons.fields[5].kind == LogicalValueKind::Hash,
            "weapon Wrightstone field");
 
+    const auto* excaliburRule = weaponRuleForHash(0x802B09DAU);
+    expect(excaliburRule && excaliburRule->displayHash == 0x1CC90CAEU &&
+           excaliburRule->characterGroup == 38U,
+           "Excalibur save key maps to its public hash and Maglielle character group");
+    expect(weaponDatabaseHash(*excaliburRule) == 0x1CC90CAEU &&
+           weaponDatabaseHashForSaveHash(0x802B09DAU) == 0x1CC90CAEU,
+           "Excalibur name lookup uses its separate public hash");
+    const auto* directDatabaseWeapon = weaponRuleForHash(0x44B508FAU);
+    expect(directDatabaseWeapon && directDatabaseWeapon->displayHash == kGlobalEmptySlotHash &&
+           weaponDatabaseHash(*directDatabaseWeapon) == 0x44B508FAU &&
+           weaponDatabaseHashForSaveHash(0x44B508FAU) == 0x44B508FAU,
+           "weapon save keys without a separate public hash fall back to their own database hash");
+    const auto excaliburDisplayRules = weaponRulesForDisplayHash(0x1CC90CAEU);
+    bool foundExcaliburSaveKey = false;
+    for (const auto& displayRule : excaliburDisplayRules) {
+        if (displayRule.weaponHash == 0x802B09DAU) foundExcaliburSaveKey = true;
+    }
+    expect(excaliburDisplayRules.size == 3U && foundExcaliburSaveKey,
+           "Excalibur public hash maps to all three save selector variants");
+    expect(excaliburRule && excaliburRule->traitGroupHashes[0] == 0x46DED645U &&
+           excaliburRule->traitGroupHashes[1] == 0xC0658382U &&
+           excaliburRule->traitGroupHashes[2] == 0x9A6D3B2BU &&
+           excaliburRule->traitGroupHashes[3] == 0xB6B8BC8AU,
+           "Excalibur Weapon Setup rule groups");
+    const auto excaliburSlotTwo = weaponTraitChoices(0xC0658382U);
+    const auto excaliburSlotThree = weaponTraitChoices(0x9A6D3B2BU);
+    expect(excaliburSlotTwo.size == 9U,
+           "Excalibur setup Slot 2 has nine normal choices");
+    expect(excaliburSlotThree.size == 2U &&
+           weaponTraitAllowed(0x9A6D3B2BU, 0x235D86EFU) &&
+           weaponTraitAllowed(0x9A6D3B2BU, 0xDC584F60U),
+           "Excalibur setup Slot 3 allows Supernova and DMG Cap");
+    expect(!weaponTraitAllowed(0x9A6D3B2BU, 0xF372F096U),
+           "Excalibur setup Slot 3 rejects HP in Game Rules mode");
+    expect(weaponRuleCount() == 410U && weaponTraitRuleGroupCount() == 771U,
+           "compact derived weapon rule database counts");
+    const auto allWeaponRules = weaponRules();
+    bool weaponSaveKeysStrictlySorted = allWeaponRules.size == weaponRuleCount();
+    bool everyDisplayHashResolvesBack = true;
+    for (std::size_t index = 0U; index < allWeaponRules.size; ++index) {
+        const auto& definition = allWeaponRules.data[index];
+        if (index != 0U && allWeaponRules.data[index - 1U].weaponHash >= definition.weaponHash) {
+            weaponSaveKeysStrictlySorted = false;
+        }
+        bool foundReverseDefinition = false;
+        for (const auto& reverseDefinition : weaponRulesForDisplayHash(definition.displayHash)) {
+            if (reverseDefinition.weaponHash == definition.weaponHash) {
+                foundReverseDefinition = true;
+                break;
+            }
+        }
+        if (!foundReverseDefinition) everyDisplayHashResolvesBack = false;
+    }
+    expect(weaponSaveKeysStrictlySorted,
+           "weapon save selector keys are unique and sorted for binary lookup");
+    expect(everyDisplayHashResolvesBack,
+           "every weapon save selector is preserved in the public-hash reverse mapping");
+
+    const auto& wrightstones = wrightstonesFamily();
+    expect(wrightstones.anchorKey == 0x0836U && wrightstones.fieldCount == 10U,
+           "Wrightstone editor includes parent fields and three linked traits");
+    expect(wrightstones.fields[0].hashCategoryFilter == "Wrightstone" &&
+           wrightstones.fields[4].hashCategoryFilter == "Trait" &&
+           wrightstones.fields[8].hashCategoryFilter == "Trait",
+           "Wrightstone per-field hash filters");
+    expect(wrightstones.fields[4].unitScope == LogicalFieldUnitScope::WrightstoneTrait1 &&
+           wrightstones.fields[5].unitScope == LogicalFieldUnitScope::WrightstoneTrait1 &&
+           wrightstones.fields[6].unitScope == LogicalFieldUnitScope::WrightstoneTrait2 &&
+           wrightstones.fields[7].unitScope == LogicalFieldUnitScope::WrightstoneTrait2 &&
+           wrightstones.fields[8].unitScope == LogicalFieldUnitScope::WrightstoneTrait3 &&
+           wrightstones.fields[9].unitScope == LogicalFieldUnitScope::WrightstoneTrait3,
+           "Wrightstone linked trait field scopes");
+    expect(logicalFieldRecordUnitId(wrightstones.fields[4], 50144U) == 140014400U &&
+           logicalFieldRecordUnitId(wrightstones.fields[5], 50144U) == 140014400U &&
+           logicalFieldRecordUnitId(wrightstones.fields[6], 50144U) == 140014401U &&
+           logicalFieldRecordUnitId(wrightstones.fields[8], 50144U) == 140014402U,
+           "Wrightstone UnitID maps to all three linked trait UnitIDs");
+    expect(logicalFamilyForAnchor(0x0836U) == &wrightstones,
+           "Wrightstone family anchor lookup");
+
     const auto& currentSigils = currentSigilsFamily();
-    expect(currentSigils.anchorKey == 0x0A8FU && currentSigils.fieldCount == 3U,
-           "current sigils editor fields");
+    expect(currentSigils.anchorKey == 0x0A8FU && currentSigils.fieldCount == 7U,
+           "current sigils editor includes both linked trait slots");
     expect(currentSigils.fields[0].hashCategoryFilter == "Sigils" &&
-           currentSigils.fields[2].hashCategoryFilter == "Characters",
+           currentSigils.fields[2].hashCategoryFilter == "Characters" &&
+           currentSigils.fields[3].hashCategoryFilter == "Trait" &&
+           currentSigils.fields[5].hashCategoryFilter == "Trait",
            "current sigils per-field filters");
+    expect(currentSigils.fields[3].unitScope == LogicalFieldUnitScope::SigilTrait1 &&
+           currentSigils.fields[4].unitScope == LogicalFieldUnitScope::SigilTrait1 &&
+           currentSigils.fields[5].unitScope == LogicalFieldUnitScope::SigilTrait2 &&
+           currentSigils.fields[6].unitScope == LogicalFieldUnitScope::SigilTrait2,
+           "current sigils linked trait field scopes");
+    expect(logicalFieldRecordUnitId(currentSigils.fields[3], 30259U) == 120025900U &&
+           logicalFieldRecordUnitId(currentSigils.fields[4], 30259U) == 120025900U &&
+           logicalFieldRecordUnitId(currentSigils.fields[5], 30259U) == 120025901U &&
+           logicalFieldRecordUnitId(currentSigils.fields[6], 30259U) == 120025901U,
+           "sigil UnitID maps to linked trait slot UnitIDs");
 
     const auto& acquiredSigils = acquiredSigilsFamily();
     expect(acquiredSigils.anchorKey == 0x1F41U && acquiredSigils.fieldCount == 2U,

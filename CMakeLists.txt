@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-project(GBFRTool VERSION 1.6.0 LANGUAGES CXX)
+project(GBFRTool VERSION 1.10.0 LANGUAGES CXX)
 
-set(GBFR_TOOL_DISPLAY_VERSION "1.06")
+set(GBFR_TOOL_DISPLAY_VERSION "1.10")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -23,6 +23,8 @@ add_library(GBFRToolCore STATIC
     src/HashDatabase.hpp
     src/ValueDecoder.cpp
     src/ValueDecoder.hpp
+    src/WeaponRules.cpp
+    src/WeaponRules.hpp
     src/version.hpp
 )
 target_include_directories(GBFRToolCore PUBLIC src)
@@ -45,25 +47,15 @@ set_target_properties(GBFRToolCLI PROPERTIES OUTPUT_NAME "GBFR-TOOL-CLI")
 if(WIN32)
     enable_language(RC)
 
-    # The RC file contains VERSIONINFO and the application icon only.
-    # Do not compile RT_MANIFEST here: MSVC already creates and embeds one
-    # linker manifest for WIN32 targets. Common Controls v6 and asInvoker are
-    # added to that same manifest through linker directives in win32_main.cpp.
-    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
-    configure_file(
-        resources/GBFRTool.rc.in
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/GBFRTool.rc"
-        @ONLY
-    )
-    configure_file(
-        resources/GBFR-TOOL.ico
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/GBFR-TOOL.ico"
-        COPYONLY
-    )
-
+    # The static RC file contains VERSIONINFO and the application icon only.
+    # Keeping it in the source tree avoids a configure_file race when MSBuild
+    # checks several project targets at the same time. Do not compile
+    # RT_MANIFEST here: MSVC already creates and embeds one linker manifest for
+    # WIN32 targets. Common Controls v6 and asInvoker are added to that same
+    # manifest through linker directives in win32_main.cpp.
     add_executable(GBFRTool WIN32
         src/win32_main.cpp
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/GBFRTool.rc"
+        resources/GBFRTool.rc
     )
     set_target_properties(GBFRTool PROPERTIES OUTPUT_NAME "GBFR-TOOL")
     target_compile_definitions(GBFRTool PRIVATE
